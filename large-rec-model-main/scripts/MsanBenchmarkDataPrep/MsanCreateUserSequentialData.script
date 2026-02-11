@@ -1,0 +1,252 @@
+/*
+Initial version of the new benchmark data for user sequential data (used user events and ad metadata from existing pipeline (aether://experiments/9b80b388-6055-4b8c-bafe-c0eb8e0603ec) generated intermedidate data for now to speed up the process)
+
+It has two columns (tab separated): UserId, UserEvents, where UserEvents contains events for a user sorted in descending order of event time. 
+
+Each user has at least one native-ad event and one non-native-ad event. 
+
+The naive-ad events include the following types: NativeImpression;NativeClick;NativeConversion.
+
+The non-native-ad events include the following types:  UET;OrganicSearchQuery;EdgePageTitle;EdgeShoppingPurchase;EdgeShoppingCart;AbandonCart;SearchClick;UETShoppingView;UETShoppingCart;OutlookSenderDomain;EdgeSearchQuery.
+
+All native-ad events events have a 14-day lookback window with end-date on Feb 26, except NativeConversion that looks forward additional 10 more days. All non-native-ad events events have a 28-day lookback window with end-date on Feb 26.
+*/
+
+[PIN] REFERENCE "/shares/BingAds.DataQuality.Shared/Modules/Newtonsoft.Json.dll";
+USING Newtonsoft.Json;
+
+REFERENCE "/shares/Bingads.algo.prod.IntentMatching/Data/Team/DemandQuality/Resources/UrlNormalizer.dll";
+
+#DECLARE TurnonUMSMapping bool = true;
+#DECLARE UMSMappingLevel string = "LikelyWithLiveIntent";
+
+#DECLARE LookbackWindowInDays int = 14;
+#DECLARE CushionInMins int = 5;
+
+Data_MSAN = 
+SELECT * FROM (SSTREAM "/local/users/zhiswa/Bechmark_Data_MSAN_JoinConversions.ss");
+
+
+Data_MSAN =
+    SELECT IF(!String.IsNullOrEmpty(StableID),StableID,IF(String.IsNullOrEmpty(ANID), MUID, ANID)) AS UserId,
+           //IF(String.IsNullOrEmpty(ANID), "M", "A") AS UserIdType,
+           Market, IF(OverallConversions.HasValue AND OverallConversions.Value>0, "NativeConversion",IF(IsClicked>0, "NativeClick","NativeImpression")) AS Type, JsonConvert.DeserializeObject<AdMetaData>(DocContent) AS DocStruct, IF(OverallConversions.HasValue AND OverallConversions.Value>0, ConversionDateTime.Value,IF(IsClicked>0, MBTime.Value, MBTime.Value)) AS CTime
+    FROM Data_MSAN
+    WHERE (!String.IsNullOrEmpty(StableID) OR !String.IsNullOrEmpty(ANID) OR !String.IsNullOrEmpty(MUID)) AND !DocContent.Contains("\"Title\":null,\"URL\":null,\"")
+    HAVING !String.IsNullOrEmpty(UserId);
+
+Data_MSAN =
+    SELECT UserId,
+           Market, Type, DocStruct.Title AS Content, DocStruct.URL AS EventDomain, CTime
+    FROM Data_MSAN;
+
+Data_MSAN_User =SELECT DISTINCT UserId FROM Data_MSAN;
+
+// Extract the existing user event benchmark data for 2025-02-26 (copied to the following path for now)
+Data_Events0 = SELECT *, JsonConvert.DeserializeObject<EventMetaData>(Event) AS EventStruct FROM (SSTREAM "/local/users/zhiswa/Bechmark_Data_Events.ss");
+Data_Events0 = SELECT UserId, EventStruct.Market AS Market, EventStruct.Type AS Type, EventStruct.Texts[0] AS Content, Relevance.UrlNormalizer.Normalize(EventStruct.Texts[1]) AS EventDomain, 
+ DateTime.Parse(EventStruct.time) AS CTime
+FROM Data_Events0
+WHERE !String.IsNullOrEmpty(UserId) 
+HAVING (Type != "NativeClick") AND (!String.IsNullOrWhiteSpace(Content));
+
+// Apply event dedup with 1 minute interval
+Data_Events0 = REDUCE Data_Events0 ON UserId,Content
+    PRESORT CTime DESC
+    USING EventIntervalReducer("minutes", "1");
+
+Data_Events0_User = SELECT DISTINCT UserId FROM Data_Events0;
+
+Common_User = SELECT A.UserId
+FROM Data_MSAN_User AS A
+INNER JOIN Data_Events0_User AS B
+ON A.UserId == B.UserId;
+
+Data_Events =
+SELECT A.*.Except(EvtCount) 
+FROM Data_Events0 AS A
+LEFT SEMIJOIN Common_User AS B
+ON A.UserId == B.UserId;
+
+Data_MSAN =
+SELECT A.* 
+FROM Data_MSAN AS A
+LEFT SEMIJOIN Common_User AS B
+ON A.UserId == B.UserId;
+
+Combined =
+SELECT * FROM Data_MSAN
+UNION ALL
+SELECT * FROM Data_Events;
+
+Combined = 
+SELECT *, new EventMetaData(CTime.ToString("yyyy-MM-dd HH:mm"), Type, Market, (new string[]{Content, EventDomain}).ToList()) AS EventStruct 
+FROM Combined;
+
+Combined_UserId_Agg = SELECT UserId, LIST(EventStruct).OrderByDescending(x=>DateTime.Parse(x.time)).ToList() AS Events 
+FROM Combined
+GROUP BY UserId
+WHERE !String.IsNullOrEmpty(UserId);
+
+Data_MSAN_WithHistory = SELECT *.Except(Events), JsonConvert.SerializeObject(Events) AS Events FROM Combined_UserId_Agg;
+OUTPUT TO "/shares/bingads.hm/local/MSANRR/MetaDataExtraction/BenchmarkV2/BatchData/2025/02/26/DataWithAllUserHistory_0226.txt";
+
+
+#CS
+using Microsoft.SCOPE.Types;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using ScopeRuntime;
+using System.Linq;
+
+
+public class EventIntervalReducer : Reducer
+{
+    public override Schema Produces(string[] requestedColumns, string[] args, Schema input)
+    {
+        input.Add(new ColumnInfo("EvtCount", ColumnDataType.Long));
+        return input;
+    }
+
+    public override IEnumerable<Row> Reduce(RowSet rowset, Row outputRow, string[] args)
+    {
+        string option = args[0].ToLowerInvariant();
+        int minutes = 0;
+        switch (option)
+        {
+            case "minutes":
+                minutes = int.Parse(args[1]);
+                break;
+
+            default:
+                throw new Exception("unknown sampling option");
+        }
+
+        DateTime prev_time = DateTime.Parse("2050-01-01");
+        long counter = 1;
+        foreach (Row row in rowset.Rows)
+        {
+            foreach (var col in row.Schema.Columns)
+            {
+                outputRow[col.Name].Set(row[col.Name].String);
+            }
+            DateTime curr_time = row["CTime"].DateTime;
+            if ((prev_time - curr_time).TotalMinutes < minutes)
+                counter++;
+            else
+            {
+                outputRow["EvtCount"].Set(counter);
+                counter = 1;
+                yield return outputRow;
+            }
+            prev_time = curr_time;
+        }
+    }
+}
+
+public class AdMetaData
+{
+    public string Kwd;
+    public string Title;
+    public string URL;
+    public string Desc;
+    public string SN;
+
+    public AdMetaData(string cleanKeyword, string title, string url, string description, string sellername) 
+    {
+        this.Kwd = cleanKeyword;
+        this.Title = title;
+        this.URL = url;
+        this.Desc = description;
+        this.SN = sellername;
+    }
+}
+
+public class EventMetaData
+{
+    public string time; // yyyy-MM-dd HH:mm
+    public string Type;
+    public string Market;
+    public List<string> Texts;
+
+    // Constructor with parameters to initialize the fields
+    public EventMetaData(string time, string type, string market, List<string> texts)
+    {
+        this.time = time;
+        this.Type = type;
+        this.Market = market;
+        this.Texts = texts;
+    }
+}
+
+
+public class URI
+{
+    public static string Host(string myUrl)
+    {
+        try
+        {
+            Uri myUri = new Uri(myUrl);
+            return myUri.Host;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+public class Tools
+{
+    static public Random rnd = new Random();
+
+    static public List<EventMetaData> ApplyLookbackWindow(DateTime curDT, List<EventMetaData> events, int lookbackWindowInDays, int cushionInMins, int maxEventCnt)
+    {
+
+        // events are already sorted
+        DateTime historyEndTime = curDT.AddMinutes(-cushionInMins);
+        DateTime historyStartTime = historyEndTime.AddDays(-lookbackWindowInDays);
+
+        List<EventMetaData> results = new List<EventMetaData>();
+        if (events == null)
+            return results;
+
+        for (int i = events.Count - 1; i >= 0; i--)
+        {
+            var tmpDT = DateTime.Parse(events[i].time);
+            if (tmpDT >= historyStartTime && tmpDT <= historyEndTime)
+                 results.Add(events[i]);
+            if (results.Count == maxEventCnt)
+                break;
+        }
+        return results;
+    }
+
+
+     static public List<EventMetaData> ApplyLookbackWindowFBS(DateTime curDT, List<EventMetaData> events, int lookbackWindowInDays, int cushionInMins, int maxEventCnt)
+    {
+
+        // events are already sorted
+        DateTime historyEndTime = curDT.AddMinutes(-cushionInMins);
+        DateTime historyStartTime = historyEndTime.AddDays(-lookbackWindowInDays);
+
+        List<EventMetaData> results = new List<EventMetaData>();
+        if (events == null)
+            return results;
+
+        for (int i = 0 ; i <= events.Count - 1; i++)
+        {
+            var tmpDT = DateTime.Parse(events[i].time);
+            if (tmpDT >= historyStartTime && tmpDT <= historyEndTime)
+                 results.Add(events[i]);
+            if (results.Count == maxEventCnt)
+                break;
+        }
+        results.Reverse();
+        return results;
+    }
+
+}
+#ENDCS

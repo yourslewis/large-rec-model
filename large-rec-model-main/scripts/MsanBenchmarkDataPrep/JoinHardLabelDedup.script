@@ -1,0 +1,378 @@
+[PIN]REFERENCE "/shares/adPlatform.AudienceIntelligence.Scoring.Prod/local/ADFScriptFiles/Prod/Targeting/UMS/resources/Scorer.dll";
+[PIN]REFERENCE "/shares/adPlatform.AudienceIntelligence.Scoring.Prod/local/ADFScriptFiles/Prod/Targeting/UMS/resources/MetadataInterface.dll";
+[PIN]REFERENCE "/shares/adPlatform.AudienceIntelligence.Scoring.Prod/local/ADFScriptFiles/Prod/Targeting/UMS/resources/ScopeLib.dll";
+[PIN]REFERENCE "/shares/adPlatform.AudienceIntelligence.Scoring.Prod/local/ADFScriptFiles/Prod/Targeting/UMS/resources/ATAlgorithm.dll";
+ 
+[PIN]REFERENCE "/shares/BingAds.DataQuality.Shared/Modules/Relevance.ScopeLib.dll";
+USING Microsoft.SegmentRelevance.ScopeLib;
+// D. Use Newton Json
+[PIN]REFERENCE "/shares/BingAds.DataQuality.Shared/Modules/Newtonsoft.Json.dll";
+USING Newtonsoft.Json;
+// E. MSAN SelectionDll
+[PIN]REFERENCE "/shares/bingads.hm/local/MSANRR/Resources/algoid_registry/Ads.MSAN.SelectionDll.dll";
+USING Ads.MSAN.SelectionDll.Common;
+USING Ads.MSAN.SelectionDll.Logging;
+ 
+RESOURCE "/shares/bingads.hm/local/MSANRR/Resources/algoid_registry/YamlDotNet.dll";
+RESOURCE "/shares/bingads.hm/local/MSANRR/Resources/algoid_registry/selection_algo.yml";
+
+
+#DECLARE EndDate string = @@RunDate@@;
+#DECLARE TAG string = "@@TAG@@";
+#DECLARE UseCase string = "@@UseCase@@";
+#DECLARE LookbackWindow int = @@LookbackWindow@@;
+#DECLARE OutDir string = @"/local/users/zhinie/MyQuery/" + @UseCase + "/" + @TAG + "_RunTime";  
+#DECLARE BatchBencmarkDir  string = @"shares/bingads.hm/local/MSANRR/MetaDataExtraction/Benchmark/CIV2/TestData30DaysLB/MsanBatchData30DaysLB/CIV2Cut0.3";
+#DECLARE BatchBencmarkFile string = @BatchBencmarkDir + "/%Y/%m/%d/DataWithHistory_%m%d.ss?date=" + @EndDate;
+#DECLARE OutRelevanceLabelsPath string = @OutDir + "/%Y/%m/BatchDataNativeImpRelevanceLabel_%Y-%m-%d.ss?date=" + @EndDate;
+#DECLARE OutRelevanceLabelsStatsPath string = @OutDir + "/%Y/%m/BatchDataNativeImpRelevanceLabel_stats_%Y-%m-%d.ss?date=" + @EndDate;
+#DECLARE LLMDataMissingCases string = @OutDir + "/%Y/%m/LLMDataMissingCases_%Y-%m-%d.ss?date=" + @EndDate;
+#DECLARE expiryDays string = "@@expiryDays@@";
+#DECLARE EndDateTimeUtc DateTime = DateTime.Parse(@EndDate + " 23:59:59");
+#DECLARE CutOffDateTimeUtc DateTime = DateTime.Parse("2025-04-03");
+//#DECLARE StartDateTimeUtc DateTime = DateTime.Parse(@EndDate).AddDays(-@LookbackWindow).AddSeconds(1);
+#DECLARE StartDate string = DateTime.Parse(@EndDate).AddDays(1-@LookbackWindow).ToString("yyyy-MM-dd");
+#DECLARE StartDateTimeUtc DateTime = DateTime.Parse(@StartDate + " 00:00:00");
+#DECLARE CurrentDate DateTime = DateTime.Parse(@EndDate);
+#DECLARE JoinRelevanceLabel string = "@@JoinRelevanceLabel@@";
+#DECLARE RemoveClickedImps string = "@@RemoveClickedImps@@";
+
+//#DECLARE Input0 string = "@@Input0@@";
+//#DECLARE Input1 string = "@@Input1@@"; 
+//#DECLARE Input2 string = "@@Input2@@"; 
+//#DECLARE Input3 string = "@@Input3@@"; 
+//#DECLARE Input4 string = "@@Input4@@"; 
+//#DECLARE Input5 string = "@@Input5@@"; 
+//#DECLARE Input6 string = "@@Input6@@"; 
+//#DECLARE Input7 string = "@@Input7@@"; 
+//#DECLARE Input8 string = "@@Input8@@"; 
+//#DECLARE Input9 string = "@@Input9@@"; 
+//#DECLARE Input10 string = "@@Input10@@"; 
+//#DECLARE Input11 string = "@@Input11@@"; 
+//#DECLARE Input12 string = "@@Input12@@"; 
+//#DECLARE Input13 string = "@@Input13@@"; 
+
+#IF(@expiryDays.Contains(@"expiryDays"))
+    #SET expiryDays = @"180";
+#ENDIF
+
+//read benchmark data
+BatchData = SELECT * FROM (SSTREAM @BatchBencmarkFile);
+
+
+BatchData = SELECT *.Except(RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType),
+                   RGUID.Trim() AS RGUID,
+                   ListingId.Trim() AS ListingId,
+                   AdId.Trim() AS AdId,
+                   AdTokenId.Trim() AS AdTokenId,
+                   DomainSpecificId.Trim() AS DomainSpecificId,
+                   DomainType.Trim() AS DomainType 
+                   FROM BatchData;  
+
+#IF(@RemoveClickedImps == "true") 
+BatchDataClicked = SELECT 
+                   *
+                   FROM BatchData
+                   WHERE IsClicked == 1;
+
+BatchDataImpressed = SELECT 
+                   *
+                   FROM BatchData
+                   WHERE IsClicked == 0;
+
+
+BatchDataImpressed = SELECT A.* FROM BatchDataImpressed AS A
+                     LEFT ANTISEMIJOIN BatchDataClicked AS B
+                     ON A.RGUID == B.RGUID 
+                     AND A.ListingId == B.ListingId
+                     AND A.AdId == B.AdId
+                     AND A.AdTokenId == B.AdTokenId
+                     AND A.DomainSpecificId == B.DomainSpecificId
+                     AND A.DomainType == B.DomainType;
+
+BatchData = SELECT * FROM BatchDataImpressed
+            UNION ALL
+            SELECT * FROM BatchDataClicked;
+#ENDIF
+
+//remove the impressions that have been clicked
+
+#DECLARE RelevanceDataPath string = @"/shares/bingads.hm/local/MSANRR/MetaDataExtraction/FBSBackup/FBS/Prod";
+#DECLARE RelevanceDataPathUpdated string = @"/shares/bingads.hm/local/MSANRR/MetaDataExtraction/FBS/Prod/";
+
+#IF(@EndDateTimeUtc <= @CutOffDateTimeUtc)
+
+RelevanceData = SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse 
+                FROM
+                (
+                  SSTREAM SPARSE
+                  STREAMSET  @RelevanceDataPath
+                  PATTERN "/%Y/%m/%d/Summary/LLMData.ss" 
+                  RANGE __date = [@StartDate,@EndDate]
+                  USING ColumnProcessor("-produce", @"RGUID,ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse", "-skipValidation")
+                 );
+
+#ENDIF
+
+#IF(@StartDateTimeUtc >  @CutOffDateTimeUtc)
+    
+    RelevanceData = SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse 
+                FROM
+                (
+                  SSTREAM SPARSE
+                  STREAMSET  @RelevanceDataPathUpdated
+                  PATTERN "/%Y/%m/%d/Summary/LLMData.ss" 
+                  RANGE __date = [@StartDate,@EndDate]
+                  USING ColumnProcessor("-produce", @"RGUID,ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse", "-skipValidation")
+                 );
+#ENDIF
+
+#IF( (@EndDateTimeUtc > @CutOffDateTimeUtc) AND (@StartDateTimeUtc <=  @CutOffDateTimeUtc) )
+    
+    RelevanceData = SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse 
+                FROM
+                (
+                  SSTREAM SPARSE
+                  STREAMSET  @RelevanceDataPath
+                  PATTERN "/%Y/%m/%d/Summary/LLMData.ss" 
+                  RANGE __date = [@StartDate,@CutOffDateTimeUtc.ToString("yyyy-MM-dd")]
+                  USING ColumnProcessor("-produce", @"RGUID,ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse", "-skipValidation")
+                 )
+                 UNION ALL
+                 SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse 
+                FROM
+                (
+                  SSTREAM SPARSE
+                  STREAMSET  @RelevanceDataPathUpdated
+                  PATTERN "/%Y/%m/%d/Summary/LLMData.ss" 
+                  RANGE __date = [@CutOffDateTimeUtc.AddDays(1).ToString("yyyy-MM-dd"),@EndDate]
+                  USING ColumnProcessor("-produce", @"RGUID,ListingId, AdId, AdTokenId, DomainSpecificId, DomainType, PromptResponse", "-skipValidation")
+                 );
+#ENDIF
+
+RelevanceData = SELECT 
+                   PromptResponse.Trim() AS PromptResponse,
+                   RGUID.Trim() AS RGUID,
+                   ListingId.Trim() AS ListingId,
+                   AdId.Trim() AS AdId,
+                   AdTokenId.Trim() AS AdTokenId,
+                   DomainSpecificId.Trim() AS DomainSpecificId,
+                   DomainType.Trim() AS DomainType 
+                   FROM RelevanceData;
+    
+RelevanceData = SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType,  ANY_VALUE(PromptResponse) AS PromptResponse 
+                FROM RelevanceData
+                GROUP BY RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType;
+                
+
+BatchData = SELECT A.*, B.PromptResponse AS PromptResponse 
+            FROM BatchData AS A 
+            LEFT OUTER JOIN RelevanceData AS B 
+            ON A.RGUID == B.RGUID 
+            AND A.ListingId == B.ListingId
+            AND A.AdId == B.AdId
+            AND A.AdTokenId == B.AdTokenId
+            AND A.DomainSpecificId == B.DomainSpecificId
+            AND A.DomainType == B.DomainType;
+
+// join the PRelevance Label
+//# DECLARE SLMDataPath string = @"/local/users/zhinie/MyQuery/Test/RawRelevanceLabelsAllNegWithHistory_RunTime/2025/03/RelevanceLabels_2025-03-01.ss";
+// dedep SLM soft label
+Data_Raw = VIEW @"/shares/Bingads.algo.prod.IntentMatching/Data/Team/ART/Selection/MetadataRefresh/MetaData/Prod/MetaData/OfflinePower/SelectionDashboard/views/MSANSelectionView.view"
+ 
+    PARAMS(
+    StartDateTime = @StartDateTimeUtc,
+    EndDateTime = @EndDateTimeUtc
+    );
+    
+Data_Raw = SELECT * FROM Data_Raw
+    WHERE MBTime >= @StartDateTimeUtc AND MBTime <= @EndDateTimeUtc
+    AND PageFraudQualityBand == -2 OR PageFraudQualityBand >= 2;
+ 
+MSANRequests =
+    SELECT          RGUID,ListingId, AdId, DomainSpecificId, 
+                    UtilConvert<byte?>.ToString(DomainType) AS DomainType,
+                    UtilConvert<ushort?>.ToString(AdTokenId) AS AdTokenId,
+                    StableID,
+                    ANID,
+                    MUID,
+                    ClientIP,
+                    TrafficSlice,
+                    (DNP??false) OR (DNT??false) AS NTNP,
+                    CommonUtil.GetDemandTypeString(Convert.ToInt32(AdDisplayTypeId), Convert.ToInt32(CampaignTypeId), Convert.ToInt32(DomainType)) AS DemandClassification,
+                    IF(NOT String.IsNullOrEmpty(SelectionServingSource_TA), SelectionLoggingParserAdv.Parse(Convert.ToUInt32(SelectionAlgoSource_TA), ServingStack.TA), // TA
+                    IF(SelectionServingSource_PA != NULL, SelectionLoggingParserAdv.Parse(SelectionAlgoSource_PA, ServingStack.PA), // PA or Part Of AIMPA
+                    IF(SelectionAlgoSource_AIMIA != "N/A", SelectionLoggingParserAdv.Parse(Convert.ToUInt32(SelectionAlgoSource_AIMIA), ServingStack.AIMIA), SelectionLoggingParserAdv.Parse(0xFFFF, ServingStack.Unknown)))) AS SelectionMetaData,
+                    Helper.GetPClickScore(pClickScores, "22") AS PClickScore22,
+                    Helper.GetPClickScore(pClickScores, "27") AS PClickScore27,
+                    RelevanceScore,
+                    OriginalRelevanceScore
+    FROM Data_Raw;
+ 
+E1 =
+    SELECT RGUID,ListingId, AdId, AdTokenId, DomainSpecificId, DomainType,
+           StableID,
+           ANID,
+           MUID,
+           ClientIP,
+           TrafficSlice,
+           NTNP,
+           DemandClassification,
+           IF(DemandClassification == "AIMIA", PClickScore27, (
+           IF(DemandClassification IN("AIMPA", "PA", "PA_pMax", "HA", "VA"),
+           IF(PClickScore22 == - 1, IF(OriginalRelevanceScore == NULL, - 1, OriginalRelevanceScore / 10000.0), 1 - PClickScore22),
+           IF(PClickScore22 == - 1, IF(RelevanceScore == NULL, - 1, RelevanceScore / 10000.0), 1 - PClickScore22)
+           ))) AS PRelevance,
+           SelectionMetaData.AlgoName AS SelectionServingSource_AlgoId
+    FROM MSANRequests;
+
+
+E1 =
+    SELECT RGUID.Trim() AS RGUID,
+           ListingId.Trim() AS ListingId, 
+           AdId.Trim() AS AdId, 
+           AdTokenId.Trim() AS AdTokenId, 
+           DomainSpecificId.Trim() AS DomainSpecificId,
+           DomainType.Trim() AS DomainType,
+           PRelevance   
+    FROM E1;
+
+//E1 = SELECT RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType,  ANY_VALUE(PRelevance) AS PRelevance  FROM (SSTREAM @SLMDataPath)
+//          GROUP BY RGUID, ListingId, AdId, AdTokenId, DomainSpecificId, DomainType;
+
+BatchData = SELECT A.*, B.PRelevance AS PRelevance FROM BatchData AS A 
+            LEFT OUTER JOIN E1 AS B 
+            ON A.RGUID == B.RGUID 
+            AND A.ListingId == B.ListingId
+            AND A.AdId == B.AdId
+            AND A.AdTokenId == B.AdTokenId
+            AND A.DomainSpecificId == B.DomainSpecificId
+            AND A.DomainType == B.DomainType;
+    
+OUTPUT BatchData TO SSTREAM @OutRelevanceLabelsPath 
+WITH STREAMEXPIRY @expiryDays;
+
+// find cases that in the LLM data but not in the BatchData
+MissingCases = SELECT A.*
+            FROM RelevanceData AS A 
+            LEFT ANTISEMIJOIN   BatchData AS B 
+            ON A.RGUID == B.RGUID 
+            AND A.ListingId == B.ListingId
+            AND A.AdId == B.AdId
+            AND A.AdTokenId == B.AdTokenId
+            AND A.DomainSpecificId == B.DomainSpecificId
+            AND A.DomainType == B.DomainType;
+
+
+RelevanceDataStats = SELECT 
+    "LLMData" AS Source,                 
+    COUNT(*) AS Count
+FROM RelevanceData
+    UNION ALL
+SELECT
+    "BatchDataPromptResponse" AS Source,                 
+    COUNTIF( PromptResponse IS NOT NULL) AS Count
+FROM BatchData
+    UNION ALL
+SELECT
+    "BatchDataRows" AS Source,                 
+COUNT(*) AS Count
+FROM BatchData
+    UNION ALL
+SELECT 
+    "PRelevanceTotal" AS Source,                 
+    COUNT(*) AS Count
+FROM E1
+     UNION ALL
+SELECT
+    "BatchDataPRelevance" AS Source,                 
+COUNTIF( PRelevance IS NOT NULL) AS Count
+FROM BatchData 
+     UNION ALL
+SELECT
+    "MissingCases" AS Source,                 
+COUNT(*) AS Count
+FROM MissingCases;
+
+OUTPUT RelevanceDataStats TO SSTREAM @OutRelevanceLabelsStatsPath
+WITH STREAMEXPIRY @expiryDays; 
+
+OUTPUT MissingCases TO SSTREAM @LLMDataMissingCases
+WITH STREAMEXPIRY @expiryDays;
+
+
+#CS
+
+public static class Helper
+{
+    public static double GetPClickScore(string PClickScores, string SlotId = "2")
+    {
+        double PClickScore = -1;
+        if (!string.IsNullOrWhiteSpace(PClickScores) && PClickScores.Contains(":"))
+        {
+            foreach (var PClicks in PClickScores.Split(';'))
+            {
+                if (string.IsNullOrWhiteSpace(PClicks)
+                || !PClicks.Contains(":"))
+                {
+                    continue;
+                }
+                var splits = PClicks.Split(':');
+ 
+                if (splits[0] == SlotId)
+                {
+                    PClickScore = double.Parse(splits[1]);
+                    return PClickScore;
+                }
+            }
+        }
+        return PClickScore;
+    }
+}
+
+
+public class UtilConvert<T>
+{
+    const int DefaultDecimal = 0;
+    const string DefaultString = @"";
+    public static bool TryParseInt32(string val)
+    {
+        int d;
+        return int.TryParse(val, out d);
+    }
+
+    public static Int32 ToInt32(T x, int def = DefaultDecimal)
+    {
+        if (x == null)
+            return Convert.ToInt32(def);
+        else
+            return Convert.ToInt32(x);
+    }
+
+    public static Int64 ToInt64(T x, long def = DefaultDecimal)
+    {
+        if (x == null)
+            return Convert.ToInt64(def);
+        else
+            return Convert.ToInt64(x);
+    }
+
+    public static Double ToDouble(T x, double def = DefaultDecimal)
+    {
+        if (x == null)
+            return Convert.ToDouble(def);
+        else
+            return Convert.ToDouble(x);
+    }
+
+    public static String ToString(T x, string def = DefaultString)
+    {
+        if (x == null)
+            return def;
+        else
+            return Convert.ToString(x);
+    }
+}
+
+
+#ENDCS

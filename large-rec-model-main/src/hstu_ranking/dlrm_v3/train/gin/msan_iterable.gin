@@ -1,0 +1,73 @@
+batch_size = 256  #total_batch_size = batch_size * 4
+num_epochs = 30
+learning_rate = 0.0001
+dataset = "msan-iterable"
+# total_lines = 5411079
+
+# hstu config
+get_hstu_configs.hstu_attn_num_layers = 8
+get_hstu_configs.max_seq_len = 256
+
+
+
+# checkpoints
+save_dmp_checkpoint.suffix = "train_5m_0001_batch256-8gpu-v100_ckpt"
+save_dmp_checkpoint.path = "./checkpoints/msan-iterable"
+load_dmp_checkpoint.path = "./checkpoints/msan-iterable/train_5m_0001_batch256-8gpu-v100_ckpt/"
+
+
+# logger variables
+MetricsLogger.exp_name = "train_5m_0001_batch256-8gpu-v100"  # folder name for training exp tensorboard log
+
+
+# ------------embedding config------------
+# make_model.precomputed_embeddings = True
+# make_model.embedding_file_paths = {
+#     "event_id": "/scratch/azureml/cr/j/2ee9950438d44f55a2cc7458bfe90f9a/cap/data-capability/wd/INPUT_data/EventEmb.npy"
+# }
+# "/scratch/azureml/cr/j/55428fd652604523af0a40ae36ce2d22/cap/data-capability/wd/INPUT_data/EventEmb.npy"
+# ----------------------------------------
+
+
+# model parameters
+make_model.dataset = "msan-iterable"  # Use the original msan config for model
+
+
+# dense model optimizer
+# Learning rate adjustment explanation:
+# 1GPU batch_size=16: lr=0.001
+# 8GPU batch_size=128: lr=0.001*sqrt(8)≈0.003 (square root scaling)
+dense_optimizer_factory_and_class.learning_rate = %learning_rate
+dense_optimizer_factory_and_class.optimizer_name = "Adam"
+dense_optimizer_factory_and_class.momentum = 0
+dense_optimizer_factory_and_class.weight_decay = 0
+dense_optimizer_factory_and_class.eps = 1e-8
+dense_optimizer_factory_and_class.betas = (0.95, 0.999)
+
+# sparse model optimizer  
+sparse_optimizer_factory_and_class.learning_rate = 0.00000001  # Adjusted from 0.001 to 0.003
+sparse_optimizer_factory_and_class.optimizer_name = "RowWiseAdagrad"
+sparse_optimizer_factory_and_class.momentum = 0
+sparse_optimizer_factory_and_class.weight_decay = 0
+sparse_optimizer_factory_and_class.eps = 1e-8
+sparse_optimizer_factory_and_class.betas = (0.95, 0.999)
+
+# dataloader configs for iterable dataset
+make_train_test_dataloaders.batch_size = %batch_size
+make_train_test_dataloaders.dataset_type = %dataset
+make_train_test_dataloaders.train_split_percentage = 0.9
+make_train_test_dataloaders.new_path_prefix = "dlrm_v3"
+make_train_test_dataloaders.num_workers = 0
+make_train_test_dataloaders.prefetch_factor = None  # Increased for better throughput
+make_train_test_dataloaders.data_path = None  # Will be overridden by command line argument
+# make_train_test_dataloaders.total_lines = %total_lines
+
+# train loop variables
+# train_loop.enable_health_monitoring = False
+train_loop.num_epochs = %num_epochs
+train_loop.output_trace = False
+train_loop.metric_log_frequency = 10
+train_loop.save_best_model = True  # Enable best model saving
+# train_loop.tb_log_dir = "/scratch/workspaceblobstore/azureml/sweet_ghost_t52zlzvhzl/logs"
+
+# eval loop variables

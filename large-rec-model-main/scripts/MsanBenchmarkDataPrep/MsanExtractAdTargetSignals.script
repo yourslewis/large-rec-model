@@ -1,0 +1,126 @@
+#DECLARE RunDate string = "2025-02-26";
+#DECLARE ConvDate string = "2025-03-08";
+#DECLARE EventDate string = "2025-02-26";
+
+#DECLARE MonetizationViewPath string = @"/shares/adCenter.BICore.SubjectArea/SubjectArea/Monetization/views/PROD/MonetizationFacts.view";
+#DECLARE ClickStartDateTimeUtc DateTime = DateTime.Parse(@EventDate + " 00:00").AddDays(-13);
+#DECLARE ClickEndDateTimeUtc DateTime = DateTime.Parse(@EventDate + " 23:59");
+
+#DECLARE ConversionStartDateTimeUtc string = DateTime.Parse(@EventDate).AddDays(-13).ToString("yyyy-MM-dd");
+#DECLARE ConversionEndDateTimeUtc string = DateTime.Parse(@ConvDate).ToString("yyyy-MM-dd");
+
+//Step1: Read click data
+Data_Click =
+    SELECT RGUID,
+           MBTime AS ClickTime,
+           AdId.ToString() AS AdId,
+           AdTokenId.ToString() AS AdTokenId,
+           OrderItemId.ToString() AS ListingId,
+           DomainSpecificId.ToString() AS DomainSpecificId,
+           (IsAppInstallConversionEnabled OR IsOfflineConversionEnabled OR IsUETConversionEnabled) AS IsConversionEnabled
+    FROM
+(VIEW @MonetizationViewPath
+PARAMS(
+StartDateTimeUtc = @ClickStartDateTimeUtc.AddHours(-1),
+EndDateTimeUtc = @ClickEndDateTimeUtc.AddHours(1),
+ReadAdImpressions = false,
+ReadClicks = true,
+ReadConversions = false,
+ReadPageViews = false,
+ReadSessions = false
+))
+WHERE MediumId IN (10, 11) AND IsClickRecord == true AND IsFraud == false;
+
+Data_Click = 
+    SELECT RGUID,ClickTime,
+           AdId,
+           AdTokenId,
+           ListingId,
+           DomainSpecificId
+    FROM Data_Click
+    WHERE IsConversionEnabled == true; 
+
+Reduced_Click = 
+    SELECT RGUID,FIRST(ClickTime) AS ClickTime,
+           FIRST(AdId) AS AdId,
+           AdTokenId,
+           FIRST(ListingId) AS ListingId,
+           FIRST(DomainSpecificId) AS DomainSpecificId
+    FROM Data_Click; 
+
+//Step2: Read Conversion data
+Data_Conversion =
+    EXTRACT
+        RGUID:string,
+        GoalType:byte,
+        AdId:ulong?,
+        AdTokenId:ushort?,
+        ConversionCount:double,
+        UniqueConversionCount:double,
+        SpecifiedConversionCount:double,
+        ConversionDateTime:DateTime,
+        ImpressionTime:DateTime,
+        PaidSearchAssistCount:int,
+        UniquePaidSearchAssistCount:int
+    FROM SPARSE STREAMSET @"/shares/AdsMPS.data.CpProd/data/CpCounts/PS/pConvertLookback/GoalInfo/"
+        PATTERN "%Y/%m/Conversions_WithUpdates_Double_PseudoGoal_%Y%m%d_0000_0_DataSet.ss"
+        RANGE __date = [@ConversionStartDateTimeUtc, @ConversionEndDateTimeUtc]
+    USING Extractors.SStream();
+
+Reduced_Conversion = 
+    SELECT RGUID,
+           FIRST(ConversionDateTime) AS ConversionDateTime,
+           FIRST(ImpressionTime) AS ImpressionTime,
+           FIRST(AdId).ToString() AS AdId,
+           AdTokenId.ToString() AS AdTokenId,
+           SUM(SpecifiedConversionCount) AS SpecifiedConversionCount,
+           SUM(PaidSearchAssistCount) AS PaidSearchAssistCount,
+           SUM(UniquePaidSearchAssistCount) AS UniquePaidSearchAssistCount
+    FROM Data_Conversion
+    WHERE (int)(ConversionDateTime.Date - ImpressionTime.Date).TotalDays <= 30;
+
+Reduced_Conversion = 
+     SELECT RGUID, AdId,
+            AdTokenId, ConversionDateTime, ImpressionTime,
+            IF ((SpecifiedConversionCount> 0), 1, 0) AS OverallConversions,
+            IF ((PaidSearchAssistCount > 0 OR UniquePaidSearchAssistCount > 0), 1, 0) AS OverallAssists
+     FROM Reduced_Conversion; 
+
+//Step3: Combine clicks and conversions data (LEFT JOIN) 
+Data_Click_Conversion =
+    SELECT A.*,
+           B.OverallConversions,
+           B.OverallAssists, B.ConversionDateTime, B.ImpressionTime
+    FROM Reduced_Click AS A
+    LEFT OUTER JOIN
+        Reduced_Conversion AS B
+        ON A.RGUID == B.RGUID AND A.AdId == B.AdId AND A.AdTokenId == B.AdTokenId;
+
+Data_Click_Conversion = 
+SELECT RGUID, AdTokenId, AdId, ListingId, DomainSpecificId, ClickTime, ConversionDateTime, ImpressionTime,
+       IF (OverallAssists IS NOT NULL, OverallAssists, 0) AS OverallAssists,
+       IF (OverallConversions IS NOT NULL, OverallConversions, 0) AS OverallConversions
+FROM Data_Click_Conversion;
+
+//Step4: Join with existing benchmark data for 2025-02-26 (copied to the following path for now) for MSAN impressions/clicks with ad metadata after pruning
+Benchmark_ImpClick = SSTREAM @"/local/users/zhiswa/Bechmark_Data_MSAN.ss";
+
+Conversions = SELECT *.Except(ListingId, AdId, DomainSpecificId, AdTokenId),
+        Convert.ToString(ListingId) AS ListingId,
+        Convert.ToString(AdId) AS AdId,
+        Convert.ToString(DomainSpecificId) AS DomainSpecificId,
+        Convert.ToString(AdTokenId) AS AdTokenId
+FROM Data_Click_Conversion;
+
+Benchmark_ImpClick = SELECT  
+        A.*, B.OverallConversions,
+           B.ClickTime, B.ConversionDateTime, B.ImpressionTime
+    FROM Benchmark_ImpClick AS A
+    LEFT OUTER JOIN Conversions AS B  
+    ON A.RGUID == B.RGUID AND 
+    A.ListingId == B.ListingId AND 
+    A.AdId == B.AdId AND 
+    A.DomainSpecificId == B.DomainSpecificId AND 
+    A.AdTokenId == B.AdTokenId; 
+
+OUTPUT TO SSTREAM @"/local/users/zhiswa/Bechmark_Data_MSAN_JoinConversions.ss";

@@ -1,0 +1,397 @@
+[PIN] REFERENCE "/shares/BingAds.DataQuality.Shared/Modules/Newtonsoft.Json.dll";
+USING Newtonsoft.Json;
+
+REFERENCE "/shares/Bingads.algo.prod.IntentMatching/Data/Team/DemandQuality/Resources/UrlNormalizer.dll";
+
+#DECLARE LookbackWindowInDays int = 30;
+#DECLARE CushionInMins int = 5;
+
+Data_WAPI_ImpClicks = 
+                    SELECT 
+                    RGUID,
+                    QueryTime AS MBTime,
+                    ClickTime,
+                    Anid AS ANID,
+                    Muid AS MUID,
+                    IP, //IPv6 AS ClientIPv6,
+                    //TrafficGroupId, PublisherId, PlacementTagId, CampaignId, AdDisplayTypeId,CampaignTypeId,AdUnitId,DistributionChannelId,BiddedKeyword,
+                    DomainSpecificId.ToString() AS DomainSpecificId,DomainType.ToString() AS DomainType,
+                    Convert.ToString(ListingId) AS ListingId,
+                    Convert.ToString(AdId) AS AdId,
+                    OfferId64.ToString() AS GlobalOfferId,
+                    Convert.ToString(AdvertiserAccountId) AS AccountId,
+                    Convert.ToString(InstrumentationTokenId) AS AdTokenId,
+                    AdType,
+                    Browser,
+                    DeviceType,
+                    Market.ToLower() AS Market,
+                    ActualAdTitle,ActualAdDesc,DisplayUrl AS DisplayURL,
+                    Seller,
+                    IF(MzEventType == "Click", true, false) AS IsClickRecord,
+                    IF(MzEventType == "AdImpression", true, false) AS IsAdImpressionRecord
+                    FROM(   
+                    VIEW "/shares/searchDM/CrossProductV2/Views/WAPIEventView.view"
+                    PARAMS(
+                        Start = DateTime.Parse("2025-02-16"),
+                        End = DateTime.Parse("2025-03-01"),
+                        Dataset = "ad",
+                        //set read hourly to true if query hourly data, otherwise by default will be daily view
+                        ReadHourly = false))
+                    WHERE  
+                    ((MzEventType == "Click") OR (MzEventType == "AdImpression")) AND AdEventType == "Native"  AND !DoNotPersonalize AND !DoNotTarget
+                      AND TrafficType == "MSAN"
+                      AND FraudQualityBand >= 2 AND MediumId == 10;
+
+Data_WAPI_ImpClicks = SELECT *, COUNTIF(IsAdImpressionRecord) AS ViewedImpressionCnt, COUNTIF(IsClickRecord) AS ValidClickCnt;
+
+Data_WAPI_ImpClicks = SELECT *, COUNT(*) AS Cnt FROM Data_WAPI_ImpClicks;
+Data_WAPI_ImpClicks = SELECT *.Except(Cnt) FROM Data_WAPI_ImpClicks;
+
+Data_WAPI_ImpClicks = SELECT * FROM Data_WAPI_ImpClicks 
+    WHERE NOT (ALL(String.IsNullOrEmpty(ANID), String.IsNullOrEmpty(MUID), ANY(String.IsNullOrEmpty(IP), IP=="0.0.0.0")));
+
+Data_WAPI_Clicks = SELECT 
+                   *
+                   FROM Data_WAPI_ImpClicks
+                   WHERE ValidClickCnt > 0;
+
+Benchmark_ImpClick_Dedup = 
+SELECT *
+FROM (SSTREAM @"/local/users/zhinie/MyQuery/JoinHardLabelDedup/Test_RunTime/2025/03/BatchDataNativeImpRelevanceLabel_2025-03-01.ss")
+WHERE NOT NotCoverByAdCorpus;
+
+Benchmark_ImpClick = SELECT A.*.Except(MBTime), A.MBTime, B.ClickTime, B.MBTime AS ImpTime FROM Benchmark_ImpClick_Dedup AS A
+                     LEFT OUTER JOIN Data_WAPI_Clicks AS B
+                     ON A.RGUID == B.RGUID 
+                     AND A.ListingId == B.ListingId
+                     AND A.AdId == B.AdId
+                     AND A.AdTokenId == B.AdTokenId
+                     AND A.DomainSpecificId == B.DomainSpecificId
+                     AND A.DomainType == B.DomainType;
+
+NativeConv =
+    SSTREAM STREAMSET @"/shares/Bingads.algo.prod.IntentMatching/Data/Team/ART/Selection/MetadataRefresh/MetaData/Prod/MetaData/OfflinePower/V5_WAPI/DailyEvents/"
+        PATTERN @"/%Y/%m/%d/NativeClick_JoinConvCEC_%Y-%m-%d.ss"
+        RANGE __date = [@"2025-02-16", @"2025-03-01"];
+
+NativeConv = SELECT * FROM NativeConv WHERE ConvLabel == 1;
+
+NativeConv = SELECT *.Except(Market), Market.ToLower() AS Market, IF(ConversionEventTime < DateTime.Parse("1970-01-02"), DateTime.Parse(ConvFileDate), ConversionEventTime) AS ConversionDateTime
+    FROM NativeConv;
+
+NativeConv = 
+    SELECT RGUID,ListingId,AdId,AdTokenId,FIRST(ConversionDateTime) AS ConversionDateTime, FIRST(ConvLabel) AS ConvLabel
+    FROM NativeConv;
+
+Data_MSAN = SELECT  
+        A.*, B.ConvLabel, B.ConversionDateTime
+    FROM Benchmark_ImpClick AS A
+    LEFT OUTER JOIN NativeConv AS B  
+    ON A.RGUID == B.RGUID AND 
+    A.ListingId == B.ListingId AND 
+    A.AdId == B.AdId AND 
+    A.AdTokenId == B.AdTokenId;
+
+// AdUnit to publisher mapping from the NativeOut data or MSAN request, since selection dashboard currently does not have publisher id
+AdUnitToPublisher1 = SELECT AdUnitId, (int) PublisherId AS PublisherId FROM (SSTREAM @"/shares/adPlatform.AudienceIntelligence.Scoring.Prod/PublicShare/Ranking/NativeOut_AdUnitToPublisher_2025-04-04.ss");
+AdUnitToPublisher2 = SELECT AdUnitId, (int) FIRST(PublisherId) AS PublisherId FROM (SSTREAM @"/shares/bingads.hm/local/MSANRR/MetaDataExtraction/Benchmark/EventDedupCIV2_Cut0.3/1MinuteInterval/MsanRequestAllNeg/2025/03/MV_Imp_AdUnitNotCovered_MSANRequest_01.ss");
+
+AdUnitToPublisher = 
+SELECT * FROM AdUnitToPublisher1
+UNION
+SELECT * FROM AdUnitToPublisher2;
+
+Data_MSAN = SELECT  
+        A.*, B.PublisherId
+    FROM Data_MSAN AS A
+    INNER JOIN AdUnitToPublisher AS B
+    ON A.AdUnitId == B.AdUnitId;
+
+Data_MSAN =
+    SELECT UserId, TG, PlacementTagId, AdUnitId.ToString() AS AdUnitId, PublisherId.ToString() AS PublisherId, AccountId, CampaignId.ToString() AS CampaignId, AdId, ListingId,
+           Market, "NativeClick" AS Type, DocContent, ClickTime.Value AS CTime, PromptResponse, PRelevance
+    FROM Data_MSAN
+    WHERE ClickTime.HasValue AND ConvLabel.HasValue AND ConvLabel.Value==1 AND !DocContent.Contains("\"Title\":null,\"URL\":null,\"")  // duplicate to get click record for records with conversions
+    UNION
+    SELECT UserId, TG, PlacementTagId, AdUnitId.ToString() AS AdUnitId, PublisherId.ToString() AS PublisherId, AccountId, CampaignId.ToString() AS CampaignId, AdId, ListingId,
+           Market, IF(ConvLabel.HasValue AND ConvLabel.Value==1, "NativeConversion",IF(IsClicked>0, "NativeClick","NativeImpression")) AS Type, DocContent, IF(ConvLabel.HasValue AND ConvLabel.Value==1, ConversionDateTime.Value, IF(IsClicked>0 AND ClickTime.HasValue, ClickTime.Value, MBTime.Value)) AS CTime, PromptResponse, PRelevance
+    FROM Data_MSAN
+    WHERE MBTime.HasValue AND !DocContent.Contains("\"Title\":null,\"URL\":null,\"");
+
+Data_MSAN =
+    SELECT *.Except(DocContent), JsonConvert.DeserializeObject<AdMetaData>(DocContent) AS DocStruct
+    FROM Data_MSAN;
+
+Data_MSAN =
+    SELECT UserId, TG, PlacementTagId, AdUnitId, PublisherId, AccountId, CampaignId, ListingId, AdId,
+       Market, Type, DocStruct.Title AS Content, DocStruct.URL AS EventDomain, CTime, PromptResponse, (PRelevance ?? -2.0) AS PRelevance
+    FROM Data_MSAN;
+
+Data_MSAN_MinMaxTime =
+SELECT UserId, MIN(CTime) AS MinTime, MAX(CTime) AS MaxTime
+WHERE Type IN ("NativeClick", "NativeImpression");
+
+[PARTITION(UserId)=(PARTITIONFUNCTION = HASH, PARTITIONCOUNT=4000, REQUIRED=true)] 
+UserEvents = SELECT UserId, Market, CTime, JsonConvert.DeserializeObject<EventMetaData>(Event) AS EventStruct0 FROM (SSTREAM @"/local/Ranking/OfflinePower/V5_WAPI/ValueUser/2025/03/01/Event_2025_03_01.ss");
+
+UserEvents = 
+    SELECT DISTINCT UserId, "" AS TG, "" AS PlacementTagId, "" AS AdUnitId, "" AS PublisherId, "" AS AccountId, "" AS CampaignId, "" AS AdId, "" AS ListingId,
+           Market, EventStruct0.Type AS Type, EventStruct0.Texts[0] AS Content, Relevance.UrlNormalizer.Normalize(EventStruct0.Texts[1]) AS EventDomain, CTime, "" AS PromptResponse, -2.0 AS PRelevance 
+FROM UserEvents
+HAVING (!string.IsNullOrWhiteSpace(Content)) AND (Type != "NativeClick" AND Type != "NativeImpression");
+
+[SKEWJOIN=(SKEW=FROMLEFT,REPARTITION=FULLJOIN)]
+[PARTITION(UserId)=(PARTITIONCOUNT=4000,REQUIRED=true)]
+UserEvents = 
+    SELECT A.*, B.MinTime, B.MaxTime
+FROM UserEvents AS A
+INNER JOIN Data_MSAN_MinMaxTime AS B
+ON A.UserId == B.UserId
+HAVING CTime >= MinTime.AddMinutes(-1*@CushionInMins).AddDays(-1*@LookbackWindowInDays) AND CTime <= MaxTime.AddMinutes(-1*@CushionInMins);
+
+Combined =
+SELECT * FROM Data_MSAN
+UNION ALL
+SELECT *.Except(MinTime, MaxTime) FROM UserEvents;
+
+Combined = 
+SELECT *, new EventMetaDataWithAdInfo(CTime.ToString("yyyy-MM-dd HH:mm:ss"), Type, Market, PromptResponse, PRelevance, TG, PlacementTagId, AdUnitId, PublisherId, AccountId, CampaignId, ListingId, AdId, (new string[]{Content, EventDomain}).ToList()) AS EventStruct 
+FROM Combined;
+
+Combined_UserId_Agg = SELECT UserId, LIST(EventStruct).OrderByDescending(x=>DateTime.Parse(x.time)).ToList() AS Events 
+FROM Combined
+GROUP BY UserId
+WHERE !String.IsNullOrEmpty(UserId);
+
+Data_MSAN_WithHistory = SELECT *.Except(Events), JsonConvert.SerializeObject(Events) AS Events FROM Combined_UserId_Agg;
+OUTPUT TO "/shares/bingads.hm/local/MSANRR/MetaDataExtraction/BenchmarkV3/MSAN/ImpNoDownsample/BatchData/2025/03/01/DataWithAllUserHistoryWithRelevanceLabels_PostLookbackWindowCutoff_ImpDedup_WithWapiClickTime_0301.txt";
+
+#CS
+using Microsoft.SCOPE.Types;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using ScopeRuntime;
+using System.Linq;
+
+using Newtonsoft.Json.Linq;
+
+public class EventIntervalReducer : Reducer
+{
+    public override Schema Produces(string[] requestedColumns, string[] args, Schema input)
+    {
+        input.Add(new ColumnInfo("EvtCount", ColumnDataType.Long));
+        return input;
+    }
+
+    public override IEnumerable<Row> Reduce(RowSet rowset, Row outputRow, string[] args)
+    {
+        string option = args[0].ToLowerInvariant();
+        int minutes = 0;
+        switch (option)
+        {
+            case "minutes":
+                minutes = int.Parse(args[1]);
+                break;
+
+            default:
+                throw new Exception("unknown sampling option");
+        }
+
+        DateTime prev_time = DateTime.Parse("2050-01-01");
+        long counter = 1;
+        foreach (Row row in rowset.Rows)
+        {
+            foreach (var col in row.Schema.Columns)
+            {
+                outputRow[col.Name].Set(row[col.Name].String);
+            }
+            DateTime curr_time = row["CTime"].DateTime;
+            if ((prev_time - curr_time).TotalMinutes < minutes)
+                counter++;
+            else
+            {
+                outputRow["EvtCount"].Set(counter);
+                counter = 1;
+                yield return outputRow;
+            }
+            prev_time = curr_time;
+        }
+    }
+}
+
+public class AdMetaData
+{
+    public string Kwd;
+    public string Title;
+    public string URL;
+    public string Desc;
+    public string SN;
+
+    public AdMetaData(string cleanKeyword, string title, string url, string description, string sellername) 
+    {
+        this.Kwd = cleanKeyword;
+        this.Title = title;
+        this.URL = url;
+        this.Desc = description;
+        this.SN = sellername;
+    }
+}
+
+public class EventMetaData
+{
+    public string time; // yyyy-MM-dd HH:mm
+    public string Type;
+    public string Market;
+    public List<string> Texts;
+
+    // Constructor with parameters to initialize the fields
+    public EventMetaData(string time, string type, string market, List<string> texts)
+    {
+        this.time = time;
+        this.Type = type;
+        this.Market = market;
+        this.Texts = texts;
+    }
+}
+
+public class EventMetaDataWithAdInfo
+{
+    public string time; // yyyy-MM-dd HH:mm
+    public string Type;
+    public string Market;
+    public double PRelevance;
+    public string PromptResponse, TG, PlacementTagId, AdUnitId, PublisherId, AccountId, CampaignId, ListingId, AdId;
+    public List<string> Texts;
+
+    // Constructor with parameters to initialize the fields
+    public EventMetaDataWithAdInfo(string time, string type, string market, string PromptResponse, double PRelevance, string TG, string PlacementTagId, string AdUnitId, string PublisherId, string AccountId, string CampaignId, string ListingId, string AdId, List<string> texts)
+    {
+        this.time = time;
+        this.Type = type;
+        this.PromptResponse = PromptResponse;
+        this.PRelevance = PRelevance;
+        this.TG = TG;
+        this.PlacementTagId = PlacementTagId;
+        this.AdUnitId = AdUnitId;
+        this.PublisherId = PublisherId;
+        this.AccountId = AccountId;
+        this.CampaignId = CampaignId;
+        this.ListingId = ListingId;
+        this.AdId = AdId;
+        this.Market = market;
+        this.Texts = texts;
+    }
+}
+
+public class URI
+{
+    public static string Host(string myUrl)
+    {
+        try
+        {
+            Uri myUri = new Uri(myUrl);
+            return myUri.Host;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+public class EventProcessor : Processor
+{
+    public override Schema Produces(string[] requestedColumns, string[] args, Schema input)
+    {
+        input.Add(new ColumnInfo("EventType", ColumnDataType.String));
+        input.Add(new ColumnInfo("Event", ColumnDataType.String));
+        input.Add(new ColumnInfo("PageUrl", ColumnDataType.String));
+        input.Add(new ColumnInfo("EventTime", ColumnDataType.DateTime));
+        input.Add(new ColumnInfo("EventMarket", ColumnDataType.String));
+        return input;
+    }
+
+    public override IEnumerable<Row> Process(RowSet inputRowset, Row outputRow, string[] args)
+    {
+        foreach (Row row in inputRowset.Rows)
+        {
+            foreach (var col in row.Schema.Columns)
+            {
+                outputRow[col.Name].Set(row[col.Name].String);
+            }
+
+            JArray EventsInput = JArray.Parse(row["Events"].String);
+            foreach (JObject Event in EventsInput)
+            {
+                string time = Event.GetValue("time").ToString();
+                string event_title = Event["Texts"][0].ToString();
+                string event_url = Event["Texts"][1].ToString();
+                string EventMarket = Event["Market"].ToString();
+                string type = Event["Type"].ToString();
+
+                outputRow["EventType"].Set(type);
+                outputRow["Event"].Set(event_title);
+                outputRow["PageUrl"].Set(event_url);
+                outputRow["EventTime"].Set(DateTime.Parse(time));
+                outputRow["EventMarket"].Set(EventMarket);
+
+                yield return outputRow;
+            }
+        }
+    }
+}
+
+public class Tools
+{
+    static public Random rnd = new Random();
+
+    static public List<EventMetaData> ApplyLookbackWindow(DateTime curDT, List<EventMetaData> events, int lookbackWindowInDays, int cushionInMins, int maxEventCnt)
+    {
+
+        // events are already sorted
+        DateTime historyEndTime = curDT.AddMinutes(-cushionInMins);
+        DateTime historyStartTime = historyEndTime.AddDays(-lookbackWindowInDays);
+
+        List<EventMetaData> results = new List<EventMetaData>();
+        if (events == null)
+            return results;
+
+        for (int i = events.Count - 1; i >= 0; i--)
+        {
+            var tmpDT = DateTime.Parse(events[i].time);
+            if (tmpDT >= historyStartTime && tmpDT <= historyEndTime)
+                 results.Add(events[i]);
+            if (results.Count == maxEventCnt)
+                break;
+        }
+        return results;
+    }
+
+
+     static public List<EventMetaData> ApplyLookbackWindowFBS(DateTime curDT, List<EventMetaData> events, int lookbackWindowInDays, int cushionInMins, int maxEventCnt)
+    {
+
+        // events are already sorted
+        DateTime historyEndTime = curDT.AddMinutes(-cushionInMins);
+        DateTime historyStartTime = historyEndTime.AddDays(-lookbackWindowInDays);
+
+        List<EventMetaData> results = new List<EventMetaData>();
+        if (events == null)
+            return results;
+
+        for (int i = 0 ; i <= events.Count - 1; i++)
+        {
+            var tmpDT = DateTime.Parse(events[i].time);
+            if (tmpDT >= historyStartTime && tmpDT <= historyEndTime)
+                 results.Add(events[i]);
+            if (results.Count == maxEventCnt)
+                break;
+        }
+        results.Reverse();
+        return results;
+    }
+
+}
+#ENDCS
