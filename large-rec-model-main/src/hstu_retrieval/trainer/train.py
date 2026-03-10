@@ -45,24 +45,29 @@ from indexing.utils import get_top_k_module
 from trainer.data_loader import create_data_loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-import mlflow
+try:
+    import mlflow
+    HAS_MLFLOW = True
+except ImportError:
+    HAS_MLFLOW = False
 from collections import defaultdict
 import shutil
 
 _original_add_scalar = SummaryWriter.add_scalar
 
-def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
-    # Call original function
-    _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
-    
-    # Log to MLflow
-    if global_step is not None:
-        mlflow.log_metric(tag, scalar_value, step=global_step)
-    else:
-        mlflow.log_metric(tag, scalar_value)
+if HAS_MLFLOW:
+    def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
+        # Call original function
+        _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
 
-# Patch the method
-SummaryWriter.add_scalar = patched_add_scalar
+        # Log to MLflow
+        if global_step is not None:
+            mlflow.log_metric(tag, scalar_value, step=global_step)
+        else:
+            mlflow.log_metric(tag, scalar_value)
+
+    # Patch the method
+    SummaryWriter.add_scalar = patched_add_scalar
 
 
 

@@ -235,8 +235,11 @@ class RotateInDomainGlobalNegativesSampler(NegativesSampler):
         self.shard_size: int = shard_size
         self.shard_counts: Dict[int, int] = shard_counts
         self.pools: Dict[int, Tuple[int, Tuple[torch.Tensor, torch.Tensor]]] = {}   # domain_id -> (current_shard_idx, (index_tensor, embedding_tensor))
-        # TODO: move this mapping to config
-        self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 0.5), (3, 0.5)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
+        # Build domain_pools_map based on available shard_counts
+        if 3 in shard_counts:
+            self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 0.5), (3, 0.5)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
+        else:
+            self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 1.0)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
 
     def debug_str(self) -> str:
         sampling_debug_str = (

@@ -42,7 +42,11 @@ from absl import app, flags
 from data.reco_dataset import get_reco_dataset
 from trainer.train import Trainer
 from trainer.util import make_model
-import mlflow
+try:
+    import mlflow
+    HAS_MLFLOW = True
+except ImportError:
+    HAS_MLFLOW = False
 import fsspec
 
 # Set absl logging config
@@ -136,7 +140,10 @@ def main(argv) -> None:  # pyre-ignore [2]
         output_path=output_path,
     )
     
-    with mlflow.start_run():
+    if HAS_MLFLOW:
+        with mlflow.start_run():
+            trainer.train()
+    else:
         trainer.train()
 
 

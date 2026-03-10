@@ -32,7 +32,10 @@ from typing import List, Optional, Dict, Tuple
 import logging
 import gin
 import fsspec
-from azureml.fsspec import AzureMachineLearningFileSystem
+try:
+    from azureml.fsspec import AzureMachineLearningFileSystem
+except ImportError:
+    AzureMachineLearningFileSystem = None
 
 SUBSCRIPTION = 'f920ee3b-6bdc-48c6-a487-9e0397b69322'
 RESOURCE_GROUP = 'msan-aml'
@@ -139,6 +142,43 @@ def get_reco_dataset(
             domain_offset=1_000_000_000,
             shard_size=25_000_000,
             shard_counts={0: 2, 1: 13, 2: 2, 3: 8},  
+            positional_sampling_ratio=positional_sampling_ratio,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    elif dataset_name == "astrov6":
+        if experiment_name == "semantic_next_event_prediction":
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
+            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
+        else:
+            raise ValueError(f"Unknown experiment {experiment_name} for dataset {dataset_name}")
+        return RecoDataset(
+            dataset_name=dataset_name,
+            max_sequence_length=max_sequence_length,
+            domain_to_item_id_range={0: (20, 42_262_200), 1: (0, 301_422_400), 2: (0, 40_592_094)},
+            embd_dim=64,
+            domain_offset=1_000_000_000,
+            shard_size=25_000_000,
+            shard_counts={0: 2, 1: 13, 2: 2},
+            positional_sampling_ratio=positional_sampling_ratio,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    elif dataset_name == "local_data":
+        if experiment_name == "semantic_next_event_prediction":
+            local_fs = fsspec.filesystem('file')
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(local_fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
+            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(local_fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
+        else:
+            raise ValueError(f"Unknown experiment {experiment_name} for dataset {dataset_name}")
+        return RecoDataset(
+            dataset_name=dataset_name,
+            max_sequence_length=max_sequence_length,
+            domain_to_item_id_range={0: (20, 999), 1: (0, 999), 2: (0, 999), 3: (0, 999)},
+            embd_dim=64,
+            domain_offset=1_000_000_000,
+            shard_size=1000,
+            shard_counts={0: 1, 1: 1, 2: 1, 3: 1},
             positional_sampling_ratio=positional_sampling_ratio,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
