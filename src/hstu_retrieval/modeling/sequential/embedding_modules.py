@@ -27,7 +27,7 @@ from transformers import AutoTokenizer, AutoModel
 from concurrent.futures import ThreadPoolExecutor
 from cachetools import LRUCache, LFUCache
 import time
-from modeling.sequential.layer_norm import LayerNorm, SwishLayerNorm, RMSNorm
+from modeling.sequential.layer_norm import LayerNorm, SwishLayerNorm
 
 
 class EmbeddingModule(torch.nn.Module):
@@ -124,45 +124,6 @@ def init_mlp_weights_optional_bias(m: torch.nn.Module) -> None:
         if m.bias is not None:
             m.bias.data.fill_(0.0)
 
-class ResidualMLP(torch.nn.Module):
-    def __init__(self, input_dim, output_dim, alpha=1):
-        super().__init__()
-        self.alpha = alpha
-
-        self.proj = torch.nn.Linear(input_dim, output_dim)
-
-        hidden_dim = 4 * output_dim
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(output_dim, hidden_dim),
-            SwishLayerNorm(hidden_dim),
-            torch.nn.Linear(hidden_dim, output_dim),
-        )
-        self.norm = LayerNorm(output_dim)
-
-        self.mlp.apply(init_mlp_weights_optional_bias)
-
-    def forward(self, x):
-        y = self.proj(x)
-        y = y + self.alpha * self.mlp(y)
-        return self.norm(y)
-
-class MLP(torch.nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
-
-        hidden_dim = 4 * output_dim
-        self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, hidden_dim),
-            SwishLayerNorm(hidden_dim),
-            torch.nn.Linear(hidden_dim, output_dim),
-        )
-        self.norm = LayerNorm(output_dim)
-
-        self.mlp.apply(init_mlp_weights_optional_bias)
-
-    def forward(self, x):
-        return self.norm(self.mlp(x))
-
 class MultiDomainPrecomputedEmbeddingModule(EmbeddingModule):
     def __init__(self, domain_to_item_id_range: Dict[int, Tuple[int, int]], shard_dirs: dict, preload: bool = False, input_dim: int = 768, output_dim: int = 256, shard_size: int = 25_000_000, domain_offset: int = 1_000_000_000) -> None:
         """
@@ -179,9 +140,24 @@ class MultiDomainPrecomputedEmbeddingModule(EmbeddingModule):
         self.shard_size = shard_size
         self.domain_offset = domain_offset
 
-        self.proj = MLP(self.input_dim, self.output_dim)
+        # self.proj = torch.nn.Linear(input_dim, output_dim)
+
+        self.proj: torch.nn.Module = torch.nn.Sequential(
+            torch.nn.Linear(
+                in_features=self.input_dim,
+                out_features=1024,
+            ),
+            SwishLayerNorm(1024),
+            torch.nn.Linear(
+                in_features=1024,
+                out_features=self.output_dim,
+            ),
+            LayerNorm(self.output_dim),
+        ).apply(init_mlp_weights_optional_bias)
+        
         
         self.domain_shard_counts = {}
+
         # self.loaded_shards = {}
         self.loaded_shards = LFUCache(maxsize=64)  # (domain_id, shard_idx) -> ndarray
 
@@ -399,7 +375,19 @@ class PinSageProjEmbeddingModule(EmbeddingModule):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.proj = MLP(self.input_dim, self.output_dim)
+        # self.proj = torch.nn.Linear(input_dim, output_dim)
+        self.proj: torch.nn.Module = torch.nn.Sequential(
+            torch.nn.Linear(
+                in_features=self.input_dim,
+                out_features=1024,
+            ),
+            SwishLayerNorm(1024),
+            torch.nn.Linear(
+                in_features=1024,
+                out_features=self.output_dim,
+            ),
+            LayerNorm(self.output_dim),
+        ).apply(init_mlp_weights_optional_bias)
 
         from modeling.sequential.pinsage.model.PinSageEncoder import PinSageEncoder
         self.model = PinSageEncoder.load(ckpt_path)

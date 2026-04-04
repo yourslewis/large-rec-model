@@ -95,7 +95,7 @@ def hstu_encoder(
         output_postproc_module=output_postproc_module,
         max_sequence_len=max_sequence_length,
         max_output_len=max_output_length,
-        embedding_dim=input_preproc_module._hidden_size,
+        embedding_dim=embedding_module.item_embedding_dim,
         num_blocks=num_blocks,
         num_heads=num_heads,
         attention_dim=dqk,

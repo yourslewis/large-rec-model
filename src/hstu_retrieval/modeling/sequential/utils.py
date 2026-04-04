@@ -14,7 +14,59 @@
 
 # pyre-unsafe
 
+from typing import Tuple
+
 import torch
+import torch.distributed as dist
+
+
+def pack_and_all_gather(
+    ids: torch.Tensor,
+    seq_ids: torch.Tensor,
+    embeddings: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    All-gather variable-length tensors across DDP ranks by padding to max length.
+
+    Args:
+        ids: (N,) int64 tensor of item IDs.
+        seq_ids: (N,) int64 tensor of sequence IDs.
+        embeddings: (N, D) float tensor of embeddings.
+
+    Returns:
+        Concatenated (ids, seq_ids, embeddings) from all ranks.
+    """
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return ids, seq_ids, embeddings
+
+    local_size = torch.tensor([ids.size(0)], device=ids.device, dtype=torch.long)
+    all_sizes = [torch.zeros_like(local_size) for _ in range(world_size)]
+    dist.all_gather(all_sizes, local_size)
+    max_size = max(s.item() for s in all_sizes)
+
+    D = embeddings.size(1)
+    padded_ids = torch.zeros(max_size, dtype=ids.dtype, device=ids.device)
+    padded_seq_ids = torch.zeros(max_size, dtype=seq_ids.dtype, device=seq_ids.device)
+    padded_embs = torch.zeros(max_size, D, dtype=embeddings.dtype, device=embeddings.device)
+    n = ids.size(0)
+    padded_ids[:n] = ids
+    padded_seq_ids[:n] = seq_ids
+    padded_embs[:n] = embeddings
+
+    gathered_ids = [torch.zeros_like(padded_ids) for _ in range(world_size)]
+    gathered_seq_ids = [torch.zeros_like(padded_seq_ids) for _ in range(world_size)]
+    gathered_embs = [torch.zeros_like(padded_embs) for _ in range(world_size)]
+
+    dist.all_gather(gathered_ids, padded_ids)
+    dist.all_gather(gathered_seq_ids, padded_seq_ids)
+    dist.all_gather(gathered_embs, padded_embs)
+
+    result_ids = torch.cat([g[:s.item()] for g, s in zip(gathered_ids, all_sizes)])
+    result_seq_ids = torch.cat([g[:s.item()] for g, s in zip(gathered_seq_ids, all_sizes)])
+    result_embs = torch.cat([g[:s.item()] for g, s in zip(gathered_embs, all_sizes)])
+
+    return result_ids, result_seq_ids, result_embs
 
 
 def batch_gather_embeddings(

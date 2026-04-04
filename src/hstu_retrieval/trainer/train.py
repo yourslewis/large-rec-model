@@ -45,24 +45,29 @@ from indexing.utils import get_top_k_module
 from trainer.data_loader import create_data_loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-import mlflow
+try:
+    import mlflow
+    HAS_MLFLOW = True
+except ImportError:
+    HAS_MLFLOW = False
 from collections import defaultdict
 import shutil
 
 _original_add_scalar = SummaryWriter.add_scalar
 
-def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
-    # Call original function
-    _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
-    
-    # Log to MLflow
-    if global_step is not None:
-        mlflow.log_metric(tag, scalar_value, step=global_step)
-    else:
-        mlflow.log_metric(tag, scalar_value)
+if HAS_MLFLOW:
+    def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
+        # Call original function
+        _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
 
-# Patch the method
-SummaryWriter.add_scalar = patched_add_scalar
+        # Log to MLflow
+        if global_step is not None:
+            mlflow.log_metric(tag, scalar_value, step=global_step)
+        else:
+            mlflow.log_metric(tag, scalar_value)
+
+    # Patch the method
+    SummaryWriter.add_scalar = patched_add_scalar
 
 
 
@@ -146,16 +151,15 @@ class Trainer:
 
         collate_fn = CollateFn(
             device=self.device,
+            domain_to_item_id_range=self.dataset.domain_to_item_id_range,
             precomputed_embeddings_domain_to_dir=self.model.precomputed_embeddings_domain_to_dir,
-            item_embedding_dim=self.model.item_embedding_dim,
-            dataset=self.dataset,
+            domain_offset=self.dataset.domain_offset,
         )
         self.train_data_loader = create_data_loader(
             self.dataset.train_dataset,
             batch_size=self.local_batch_size,     # set to be 128
             world_size=self.world_size,      
             rank=self.rank,
-            mode="train",
             shuffle=True,
             drop_last=self.world_size > 1, 
             random_seed=self.random_seed,
@@ -166,8 +170,7 @@ class Trainer:
             batch_size=self.eval_batch_size,      # default to be 128
             world_size=self.world_size,
             rank=self.rank,
-            mode="eval",
-            shuffle=False,     
+            shuffle=True,     
             drop_last=self.world_size > 1,
             random_seed=self.random_seed,
             collate_fn=collate_fn,
@@ -238,7 +241,7 @@ class Trainer:
                 user_id = row["user_id"]
                 input_ids = row["input_ids"].to(self.device, non_blocking=True)                                                    # [B, N]
                 raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
-                type_ids = row["type_ids"].to(self.device, non_blocking=True)                                                 # [B, N]                                                        # [B, N]
+                ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
                 timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
                 lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
@@ -246,7 +249,7 @@ class Trainer:
                 label_ids     = input_ids[:, 1:]                             # [B, N-1]
                 new_raw_input_embeddings = raw_input_embeddings[:, :-1, :]   # [B, N-1, D]
                 raw_label_embeddings     = raw_input_embeddings[:, 1:, :]    # [B, N-1, D]
-                new_type_ids = type_ids[:, :-1]                              # [B, N-1]
+                new_ratings = ratings                                # ignore ratings for now
                 new_timestamps = timestamps[:, :-1]                          # [B, N-1]
                 new_lengths = lengths - 1                                    # [B]
 
@@ -280,7 +283,7 @@ class Trainer:
                     input_lengths=new_lengths,
                     label_ids=label_ids,
                     raw_label_embeddings=raw_label_embeddings,
-                    type_ids=new_type_ids,
+                    ratings=new_ratings,
                     timestamps=new_timestamps,
                     user_ids=user_id,
                 )
@@ -339,7 +342,7 @@ class Trainer:
             user_id = row["user_id"]
             input_ids = row["input_ids"].to(self.device, non_blocking=True)                                                    # [B, N]
             raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
-            type_ids = row["type_ids"].to(self.device, non_blocking=True)                                                      # [B, N]
+            ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
             timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
             lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
@@ -349,7 +352,7 @@ class Trainer:
                 self.model.module,
                 input_ids,
                 raw_input_embeddings,
-                type_ids,
+                ratings,
                 timestamps,
                 lengths,
                 user_id

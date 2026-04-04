@@ -24,7 +24,7 @@ from modeling.sequential.encoder_utils import (
 
 from modeling.sequential.input_features_preprocessors import (
     LearnablePositionalEmbeddingInputFeaturesPreprocessor,
-    LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor,
+    LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
 )
 from modeling.sequential.losses.sampled_softmax import (
     SampledSoftmaxLoss,
@@ -61,12 +61,12 @@ def make_model(
 
     main_module: str = "HSTU",  # set to be "HSTU"
     embedding_module_type: str = "local",  # set to be "local"
-    item_embedding_dim: int = 50, 
-    model_hidden_size: int = 768, 
+    item_embedding_dim: int = 50,  
     interaction_module_type: str = "DotProduct",  
     user_embedding_norm: str = "l2_norm",  
     input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
     dropout_rate: float = 0.2, 
+    rating_embedding_dim: int = 5,  # used for "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor"
     loss_module: str = "SampledSoftmaxLoss", 
     loss_weights: Optional[Dict[str, float]] = {},
     temperature: float = 0.05, 
@@ -87,11 +87,11 @@ def make_model(
         main_module=main_module,
         embedding_module_type=embedding_module_type,
         item_embedding_dim=item_embedding_dim,
-        model_hidden_size=model_hidden_size,
         interaction_module_type=interaction_module_type,
         user_embedding_norm=user_embedding_norm,
         input_preproc_module_type=input_preproc_module_type,
         dropout_rate=dropout_rate,
+        rating_embedding_dim=rating_embedding_dim,
         loss_module=loss_module,
         loss_weights=loss_weights,
         temperature=temperature,
@@ -118,11 +118,11 @@ class SequentialRetrieval(torch.nn.Module):
             main_module: str = "HSTU",  # set to be "HSTU"
             embedding_module_type: str = "local",  # set to be "local"
             item_embedding_dim: int = 50,  
-            model_hidden_size: int = 768, 
             interaction_module_type: str = "DotProduct",  
             user_embedding_norm: str = "l2_norm",  
             input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
             dropout_rate: float = 0.2, 
+            rating_embedding_dim: int = 5,  # only used for "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor"
             loss_module: str = "SampledSoftmaxLoss", 
             loss_weights: Optional[Dict[str, float]] = {},  # default to be {}
             temperature: float = 0.05, 
@@ -137,7 +137,7 @@ class SequentialRetrieval(torch.nn.Module):
         self.max_item_id = dataset.max_item_id
         self.min_item_id = dataset.min_item_id
         self.max_sequence_length = dataset.max_sequence_length
-        self.num_event_types = dataset.num_event_types
+        self.num_ratings = dataset.num_ratings
         self.domain_to_item_id_range = dataset.domain_to_item_id_range
         self.precomputed_embeddings_domain_to_dir = precomputed_embeddings_domain_to_dir
         self.embd_dim = dataset.embd_dim
@@ -149,11 +149,11 @@ class SequentialRetrieval(torch.nn.Module):
         self.main_module = main_module
         self.embedding_module_type = embedding_module_type
         self.item_embedding_dim = item_embedding_dim
-        self.model_hidden_size = model_hidden_size
         self.interaction_module_type = interaction_module_type
         self.user_embedding_norm = user_embedding_norm
         self.input_preproc_module_type = input_preproc_module_type
         self.dropout_rate = dropout_rate
+        self.rating_embedding_dim = rating_embedding_dim
         self.loss_module = loss_module
         self.loss_weights = loss_weights
         self.temperature = temperature
@@ -212,7 +212,6 @@ class SequentialRetrieval(torch.nn.Module):
         ), f"Not implemented for {self.user_embedding_norm}"
         output_postproc_module = (
             L2NormEmbeddingPostprocessor(
-                model_hidden_size=self.model_hidden_size,
                 embedding_dim=self.item_embedding_dim,          # set to be 50
                 eps=1e-6,
             )
@@ -228,13 +227,13 @@ class SequentialRetrieval(torch.nn.Module):
                 embedding_dim=self.item_embedding_dim,                                                    # set to be 50
                 dropout_rate=self.dropout_rate,                                                           # set to be 0.2
             )
-        elif self.input_preproc_module_type == "LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor":
-            input_preproc_module = LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
+        elif self.input_preproc_module_type == "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor":
+            input_preproc_module = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
                 max_sequence_len=self.max_sequence_length,                 # set to be 200 + 10(default) + 1 = 211
-                item_embedding_dim=self.item_embedding_dim,                # set to be 50
-                model_hidden_size=self.model_hidden_size,                  # set to be 768
-                dropout_rate=self.dropout_rate,                            # set to be 0.2
-                num_event_types=self.num_event_types,                      # set to be 12                              
+                item_embedding_dim=self.item_embedding_dim,                        # set to be 50
+                dropout_rate=self.dropout_rate,                                   # set to be 0.2
+                rating_embedding_dim=self.rating_embedding_dim,                     # set to be 50
+                num_ratings=self.num_ratings,                             
             )
 
         model = get_sequential_encoder(
@@ -349,7 +348,7 @@ class SequentialRetrieval(torch.nn.Module):
         input_lengths: torch.Tensor,
         label_ids: torch.Tensor,
         raw_label_embeddings: torch.Tensor,
-        type_ids: torch.Tensor,
+        ratings: torch.Tensor = None,
         timestamps: torch.Tensor = None,
         user_ids: torch.Tensor = None,   
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -359,7 +358,7 @@ class SequentialRetrieval(torch.nn.Module):
             input_ids: Tensor of shape (batch_size, max_sequence_length) containing item IDs.
             input_lengths: Tensor of shape (batch_size,) containing the lengths of each sequence.
             label_ids: Tensor of shape (batch_size, max_sequence_length) containing labels for next items.
-            type_ids: Tensor of shape (batch_size, max_sequence_length) containing type IDs for items.
+            ratings: Tensor of shape (batch_size, max_sequence_length) containing ratings for items.
             timestamps: Tensor of shape (batch_size, max_sequence_length) containing timestamps for items.
             user_ids: Tensor of shape (batch_size,) containing user IDs.
 
@@ -371,13 +370,14 @@ class SequentialRetrieval(torch.nn.Module):
         past_embeddings = self.model._embedding_module(raw_input_embeddings)   
         supervision_embeddings = self.model._embedding_module(raw_label_embeddings)
         # logging.info(f"input shape {input.shape}")                    [128, 200]
+        # logging.info(f"ratings shape {ratings.shape}")               
         # logging.info(f"intput_embeddings shape {input_embeddings.shape}")   [128, 200, 50]
                       
         seq_embeddings = self.model(
             past_lengths=input_lengths,
             past_ids=input_ids,
             past_embeddings=past_embeddings,
-            past_payloads={"timestamps": timestamps, "type_ids": type_ids}, 
+            past_payloads={"timestamps": timestamps, "ratings": ratings},                                      # past_ratings, (past_timestamps + 1)
         )
         # logging.info(f"seq_embeddings shape {seq_embeddings.shape}")                     # [128, 211, 50]
 

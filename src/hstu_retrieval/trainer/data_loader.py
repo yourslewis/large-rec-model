@@ -29,7 +29,6 @@ def create_data_loader(
     batch_size: int,
     world_size: int,
     rank: int,
-    mode: str,
     shuffle: bool = True,  
     prefetch_factor: int = 128,
     num_workers: Optional[int] = 4,
@@ -37,9 +36,6 @@ def create_data_loader(
     random_seed: Optional[int] = 42,
     collate_fn: Optional[callable] = None,
 ) -> torch.utils.data.DataLoader:  
-    if mode == "eval":
-        num_workers = 0  # Disable multi-processing data loading for evaluation 
-
     if shuffle:
         logging.info("Enable Buffered Shuffling with seed: %s", random_seed)
         dataset = BufferedShuffleDataset(dataset, seed=random_seed)
@@ -56,8 +52,7 @@ def create_data_loader(
         drop_last=drop_last,  # Drop the last incomplete batch if specified
         # prefetch_factor=prefetch_factor,
         collate_fn=collate_fn,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
+        pin_memory=True
     )
 
     return data_loader
