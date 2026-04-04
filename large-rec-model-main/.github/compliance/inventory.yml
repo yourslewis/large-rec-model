@@ -1,5 +1,0 @@
-inventory:
-- source: DirectOwners
-  items:
-  - id: menghaoyang@microsoft.com
-  isProduction: false
