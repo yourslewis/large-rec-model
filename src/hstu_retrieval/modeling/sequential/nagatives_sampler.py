@@ -8,6 +8,7 @@ from modeling.sequential.utils import (
 )
 import gc
 import logging
+from registry import register
 
 class NegativesSampler(torch.nn.Module):
     def __init__(self, l2_norm: bool, l2_norm_eps: float) -> None:
@@ -54,6 +55,7 @@ class NegativesSampler(torch.nn.Module):
         pass
 
 
+@register("sampler", "local")
 class LocalNegativesSampler(NegativesSampler):
     def __init__(
         self,
@@ -107,6 +109,7 @@ class LocalNegativesSampler(NegativesSampler):
         return sampled_ids, self.normalize_embeddings(self._item_emb(sampled_ids))
 
 
+@register("sampler", "InBatch")
 class InBatchNegativesSampler(NegativesSampler):
     """
     In-batch negatives sampler for contrastive training (e.g., InfoNCE).
@@ -227,6 +230,7 @@ class InBatchNegativesSampler(NegativesSampler):
         )
 
 
+@register("sampler", "RotateInDomainGlobalNegativesSampler")
 class RotateInDomainGlobalNegativesSampler(NegativesSampler):
     def __init__(self, item_emb: EmbeddingModule, domain_offset: int, shard_size: int, shard_counts: Dict[int, int], l2_norm: bool, l2_norm_eps: float) -> None:
         super().__init__(l2_norm=l2_norm, l2_norm_eps=l2_norm_eps)
@@ -346,6 +350,7 @@ class RotateInDomainGlobalNegativesSampler(NegativesSampler):
         return sampled_ids, sampled_negative_embeddings
     
 
+@register("sampler", "Hybrid")
 class HybridNegativesSampler(NegativesSampler):
     """
     Hybrid negatives sampler that combines in-batch and rotate-based global negative sampling.

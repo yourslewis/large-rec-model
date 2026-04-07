@@ -21,6 +21,7 @@ from typing import Dict, Tuple
 import torch
 
 from modeling.initialization import truncated_normal
+from registry import register
 
 
 class InputFeaturesPreprocessorModule(torch.nn.Module):
@@ -39,6 +40,7 @@ class InputFeaturesPreprocessorModule(torch.nn.Module):
         pass
 
 
+@register("preprocessor", "LearnablePositionalEmbeddingInputFeaturesPreprocessor")
 class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
@@ -89,6 +91,7 @@ class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
         return past_lengths, user_embeddings, valid_mask
 
 
+@register("preprocessor", "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor")
 class LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
@@ -153,6 +156,7 @@ class LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
         return past_lengths, user_embeddings, valid_mask
 
 
+@register("preprocessor", "CombinedItemAndRatingInputFeaturesPreprocessor")
 class CombinedItemAndRatingInputFeaturesPreprocessor(InputFeaturesPreprocessorModule):     # for ranking task, need to revisit
     def __init__(
         self,

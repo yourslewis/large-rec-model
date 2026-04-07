@@ -46,6 +46,8 @@ from modeling.similarity_module import (
 )
 from rails.similarities.module import SimilarityModule
 
+from registry import register
+
 
 class StandardAttentionFF(torch.nn.Module):
     def __init__(
@@ -82,6 +84,7 @@ class StandardAttentionFF(torch.nn.Module):
         return self._conv1d(inputs.transpose(-1, -2)).transpose(-1, -2) + inputs
 
 
+@register("encoder", "SASRec")
 class SASRec(SequentialEncoderWithLearnedSimilarityModule):
     """
     Implements SASRec (Self-Attentive Sequential Recommendation, https://arxiv.org/abs/1808.09781, ICDM'18).
