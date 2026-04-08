@@ -24,7 +24,8 @@ from modeling.sequential.encoder_utils import (
 
 from modeling.sequential.input_features_preprocessors import (
     LearnablePositionalEmbeddingInputFeaturesPreprocessor,
-    LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
+    LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor,
+    LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor,
 )
 from modeling.sequential.losses.sampled_softmax import (
     SampledSoftmaxLoss,
@@ -61,7 +62,8 @@ def make_model(
 
     main_module: str = "HSTU",  # set to be "HSTU"
     embedding_module_type: str = "local",  # set to be "local"
-    item_embedding_dim: int = 50,  
+    item_embedding_dim: int = 50,
+    model_hidden_size: int = 0,  # 0 = same as item_embedding_dim
     interaction_module_type: str = "DotProduct",  
     user_embedding_norm: str = "l2_norm",  
     input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
@@ -90,6 +92,7 @@ def make_model(
         main_module=main_module,
         embedding_module_type=embedding_module_type,
         item_embedding_dim=item_embedding_dim,
+        model_hidden_size=model_hidden_size,
         interaction_module_type=interaction_module_type,
         user_embedding_norm=user_embedding_norm,
         input_preproc_module_type=input_preproc_module_type,
@@ -123,7 +126,8 @@ class SequentialRetrieval(torch.nn.Module):
 
             main_module: str = "HSTU",  # set to be "HSTU"
             embedding_module_type: str = "local",  # set to be "local"
-            item_embedding_dim: int = 50,  
+            item_embedding_dim: int = 50,
+            model_hidden_size: int = 0,  # 0 = same as item_embedding_dim
             interaction_module_type: str = "DotProduct",  
             user_embedding_norm: str = "l2_norm",  
             input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
@@ -163,6 +167,7 @@ class SequentialRetrieval(torch.nn.Module):
         self.main_module = main_module
         self.embedding_module_type = embedding_module_type
         self.item_embedding_dim = item_embedding_dim
+        self.model_hidden_size = model_hidden_size if model_hidden_size > 0 else item_embedding_dim
         self.interaction_module_type = interaction_module_type
         self.user_embedding_norm = user_embedding_norm
         self.input_preproc_module_type = input_preproc_module_type
@@ -243,11 +248,24 @@ class SequentialRetrieval(torch.nn.Module):
             )
         elif self.input_preproc_module_type == "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor":
             input_preproc_module = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
-                max_sequence_len=self.max_sequence_length,                 # set to be 200 + 10(default) + 1 = 211
-                item_embedding_dim=self.item_embedding_dim,                        # set to be 50
-                dropout_rate=self.dropout_rate,                                   # set to be 0.2
-                rating_embedding_dim=self.rating_embedding_dim,                     # set to be 50
+                max_sequence_len=self.max_sequence_length,
+                item_embedding_dim=self.item_embedding_dim,
+                dropout_rate=self.dropout_rate,
+                rating_embedding_dim=self.rating_embedding_dim,
                 num_ratings=self.num_ratings,                             
+            )
+        elif self.input_preproc_module_type == "LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor":
+            input_preproc_module = LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
+                max_sequence_len=self.max_sequence_length,
+                embedding_dim=self.item_embedding_dim,
+                dropout_rate=self.dropout_rate,
+            )
+
+        # Optional projection: item_embedding_dim → model_hidden_size
+        self._embedding_proj = None
+        if self.model_hidden_size != self.item_embedding_dim:
+            self._embedding_proj = torch.nn.Linear(
+                self.item_embedding_dim, self.model_hidden_size, bias=False
             )
 
         model = get_sequential_encoder(

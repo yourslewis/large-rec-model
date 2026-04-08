@@ -114,6 +114,7 @@ class EmbeddingConfig:
     """Embedding module configuration."""
     type: str = "local"  # "local" | "MultiDomainPrecomputed" | "xlm_roberta_base_proj" | "pinsage_proj"
     item_embedding_dim: int = 50
+    model_hidden_size: int = 0  # 0 = same as item_embedding_dim (no projection)
     domain_offset: int = 1_000_000_000
     # For precomputed embeddings
     input_dim: int = 64
@@ -133,6 +134,8 @@ class PreprocessorConfig:
     type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor"
     dropout_rate: float = 0.2
     rating_embedding_dim: int = 5
+    num_event_types: int = 8
+    event_type_embedding_dim: int = 16
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PreprocessorConfig":
