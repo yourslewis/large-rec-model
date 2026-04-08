@@ -98,6 +98,8 @@ class Trainer:
         save_ckpt_every_n: int = 10,
         enable_tf32: bool = False,         # set to be True
         random_seed: int = 42,             # set to be 42
+        eval_method: str = "pplx",  # "pplx" | "retrieval" | "sharded"
+        eval_max_batches: int = 100,
     ):
         self.local_rank = local_rank
         self.device = local_rank
@@ -126,6 +128,8 @@ class Trainer:
         self.save_ckpt_every_n = save_ckpt_every_n
         self.enable_tf32 = enable_tf32
         self.random_seed = random_seed
+        self.eval_method = eval_method
+        self.eval_max_batches = eval_max_batches
 
         # Setup and initialization
         self.setup()
@@ -265,10 +269,10 @@ class Trainer:
                     logging.info("rotating negatives sampler")
                     self.model.module.negatives_sampler['eval'].rotate()
 
-                    logging.info("running evaluation for ads log perplexity")
+                    logging.info(f"running evaluation (method={self.eval_method})")
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                    self.run_evaluation_with_pplx(
+                    self.evaluate(
                         batch_id, 
                         epoch
                     )
@@ -326,6 +330,24 @@ class Trainer:
         self.cleanup()
 
 
+    def evaluate(self, train_batch_id: int, train_epoch: int) -> None:
+        """Unified evaluation dispatcher — routes to the configured eval method.
+
+        eval_method:
+            "pplx"      — log perplexity eval (eval_metrics_v3, fast)
+            "retrieval"  — single-domain retrieval eval (eval_metrics_v2)
+            "sharded"    — sharded multi-rank retrieval eval
+        """
+        if self.eval_method == "pplx":
+            self.run_evaluation_with_pplx(train_batch_id, train_epoch)
+        elif self.eval_method == "sharded":
+            self.run_sharded_evaluation(train_batch_id, train_epoch)
+        elif self.eval_method == "retrieval":
+            self.run_evaluation(train_batch_id, train_epoch)
+        else:
+            logging.warning(f"Unknown eval_method '{self.eval_method}', falling back to pplx")
+            self.run_evaluation_with_pplx(train_batch_id, train_epoch)
+
     def run_evaluation_with_pplx(self, train_batch_id, train_epoch) -> None:
         self.model.eval()
 
@@ -362,7 +384,7 @@ class Trainer:
                 eval_dict_all[k].append(v)
 
             batch_id += 1
-            if batch_id>100:
+            if batch_id >= self.eval_max_batches:
                 break
 
         assert eval_dict_all is not None
@@ -480,7 +502,7 @@ class Trainer:
             batch_id += 1
 
             logging.info(f"eval @ 'eval iteration' {batch_id} ")
-            if batch_id>=50:
+            if batch_id >= self.eval_max_batches:
                 break
 
         # Merge metric tensors per rank

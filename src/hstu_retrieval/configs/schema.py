@@ -271,8 +271,10 @@ class DomainEvalConfig:
 
 @dataclass
 class EvalConfig:
-    """Evaluation configuration — supports multiple eval domains."""
+    """Evaluation configuration — supports multiple eval strategies."""
+    method: str = "pplx"  # "pplx" | "retrieval" | "sharded"
     interval: int = 1000  # eval every N training steps
+    max_batches: int = 100
     full_eval_every_n: int = 1
     # Future: organic vs ads evaluation
     domains: Dict[str, DomainEvalConfig] = field(default_factory=lambda: {
@@ -285,7 +287,9 @@ class EvalConfig:
         for name, dcfg in d.get("domains", {"ads": {}}).items():
             domains[name] = DomainEvalConfig.from_dict(dcfg if isinstance(dcfg, dict) else {})
         return cls(
+            method=d.get("method", "pplx"),
             interval=d.get("interval", 1000),
+            max_batches=d.get("max_batches", 100),
             full_eval_every_n=d.get("full_eval_every_n", 1),
             domains=domains,
         )
