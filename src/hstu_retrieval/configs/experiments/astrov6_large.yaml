@@ -60,6 +60,12 @@ model:
     item_l2_norm: true
     l2_norm_eps: 1.0e-6
   interaction_type: DotProduct
+  # Supervision weighting — config-driven replacement for hardcoded 32x ads multiplier
+  supervision:
+    domain_weights:
+      0: 32.0       # Domain 0 (ads) gets 32x weight
+    train_domains: null  # null = all domains; [0] = ads only
+    target_position: all  # "all" | "last"
   # Future: interest extraction
   interest:
     mode: single

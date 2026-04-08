@@ -178,6 +178,32 @@ class SamplingConfig:
 
 
 @dataclass
+class SupervisionConfig:
+    """Supervision weight configuration — replaces hardcoded domain weighting logic.
+
+    Controls how supervision_weights are computed in forward():
+    - domain_weights: per-domain multiplier (e.g., {0: 32.0} to upweight ads)
+    - train_domains: restrict training to specific domains (None = all)
+    - target_position: which positions to supervise
+    """
+    domain_weights: Dict[int, float] = field(default_factory=lambda: {0: 32.0})
+    train_domains: Optional[List[int]] = None  # None = all domains
+    target_position: str = "all"  # "all" | "last" | "last_positive"
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SupervisionConfig":
+        domain_weights = {int(k): float(v) for k, v in d.get("domain_weights", {0: 32.0}).items()}
+        train_domains = d.get("train_domains", None)
+        if train_domains is not None:
+            train_domains = [int(x) for x in train_domains]
+        return cls(
+            domain_weights=domain_weights,
+            train_domains=train_domains,
+            target_position=d.get("target_position", "all"),
+        )
+
+
+@dataclass
 class InterestConfig:
     """Interest extraction configuration (Future: single/multi interest)."""
     mode: str = "single"  # "single" | "multi"
@@ -201,6 +227,7 @@ class ModelConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     interest: InterestConfig = field(default_factory=InterestConfig)
+    supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     interaction_type: str = "DotProduct"
 
     @classmethod
@@ -213,6 +240,7 @@ class ModelConfig:
             loss=LossConfig.from_dict(d.get("loss", {})),
             sampling=SamplingConfig.from_dict(d.get("sampling", {})),
             interest=InterestConfig.from_dict(d.get("interest", {})),
+            supervision=SupervisionConfig.from_dict(d.get("supervision", {})),
             interaction_type=d.get("interaction_type", "DotProduct"),
         )
 

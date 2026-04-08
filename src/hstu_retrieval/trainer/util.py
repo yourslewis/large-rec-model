@@ -74,7 +74,10 @@ def make_model(
     loss_activation_checkpoint: bool = False,
     sampling_strategy: str = "local",  
     item_l2_norm: bool = True,  
-    l2_norm_eps: float = 1e-6,  
+    l2_norm_eps: float = 1e-6,
+    supervision_domain_weights: Optional[Dict[int, float]] = None,
+    supervision_train_domains: Optional[List[int]] = None,
+    supervision_target_position: str = "all",
 ) -> torch.nn.Module:
     """
     Create and return the model for training.
@@ -100,6 +103,9 @@ def make_model(
         sampling_strategy=sampling_strategy,
         item_l2_norm=item_l2_norm,
         l2_norm_eps=l2_norm_eps,
+        supervision_domain_weights=supervision_domain_weights,
+        supervision_train_domains=supervision_train_domains,
+        supervision_target_position=supervision_target_position,
         )
     return model
 
@@ -130,7 +136,10 @@ class SequentialRetrieval(torch.nn.Module):
             loss_activation_checkpoint: bool = False,
             sampling_strategy: str = "global",  
             item_l2_norm: bool = True,  
-            l2_norm_eps: float = 1e-6,  
+            l2_norm_eps: float = 1e-6,
+            supervision_domain_weights: Optional[Dict[int, float]] = None,
+            supervision_train_domains: Optional[List[int]] = None,
+            supervision_target_position: str = "all",
             ) -> None:
         super().__init__()
 
@@ -145,6 +154,11 @@ class SequentialRetrieval(torch.nn.Module):
         self.shard_size = dataset.shard_size
         self.shard_counts = dataset.shard_counts
         self.pinsage_ckpt_path = pinsage_ckpt_path
+
+        # Supervision config (defaults match legacy behavior: domain 0 weighted 32x)
+        self.supervision_domain_weights = supervision_domain_weights or {0: 32.0}
+        self.supervision_train_domains = supervision_train_domains
+        self.supervision_target_position = supervision_target_position
 
         self.main_module = main_module
         self.embedding_module_type = embedding_module_type
@@ -383,17 +397,35 @@ class SequentialRetrieval(torch.nn.Module):
 
 
         ar_mask = label_ids != 0
-        # if label_ids < self.domain_offset (domain 0, target domain), increase supervision_weights
         supervision_weights = ar_mask.float()
 
-        # adjust supervision weights for ad events
-        supervision_weights[label_ids < self.domain_offset] *= 32.0
+        # Config-driven domain weighting (replaces hardcoded 32x multiplier)
+        for domain_id, weight in self.supervision_domain_weights.items():
+            if domain_id == 0:
+                # Domain 0: label_ids < domain_offset
+                domain_mask = label_ids < self.domain_offset
+            else:
+                # Domain N: label_ids in [N * domain_offset, (N+1) * domain_offset)
+                domain_mask = (label_ids >= domain_id * self.domain_offset) & (
+                    label_ids < (domain_id + 1) * self.domain_offset
+                )
+            supervision_weights[domain_mask] *= weight
 
-        # train on ad events only
-        # supervision_weights[label_ids >= self.domain_offset] *= 0
+        # Config-driven domain restriction (replaces commented-out "train on ads only")
+        if self.supervision_train_domains is not None:
+            train_mask = torch.zeros_like(label_ids, dtype=torch.bool)
+            for domain_id in self.supervision_train_domains:
+                if domain_id == 0:
+                    train_mask |= label_ids < self.domain_offset
+                else:
+                    train_mask |= (label_ids >= domain_id * self.domain_offset) & (
+                        label_ids < (domain_id + 1) * self.domain_offset
+                    )
+            supervision_weights[~train_mask] = 0.0
 
-        # train on last event only (must be ad event due to data construction)
-        # supervision_weights = keep_last_nonzero(supervision_weights)
+        # Config-driven target position (replaces commented-out "train on last event only")
+        if self.supervision_target_position == "last":
+            supervision_weights = keep_last_nonzero(supervision_weights)
 
         loss, aux_losses, metrics = self.ar_loss(
             lengths=input_lengths,  # [B],
