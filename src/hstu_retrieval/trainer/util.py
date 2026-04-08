@@ -37,7 +37,7 @@ from modeling.sequential.output_postprocessors import (
 from modeling.similarity_utils import (
     get_similarity_function,
 )
-from typing import Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional
 from data.reco_dataset import RecoDataset
 
 
