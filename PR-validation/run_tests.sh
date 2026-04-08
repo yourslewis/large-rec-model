@@ -35,6 +35,9 @@ set -euo pipefail
 GPU_HOST="${GPU_HOST:-yourslewis@192.168.0.23}"
 GPU_BASE="${GPU_BASE:-/home/yourslewis/lrm_validation}"
 DATA_DIR="${DATA_DIR:-/home/yourslewis/lrm_astrov6_split}"
+ADS_EMBD="${ADS_EMBD:-${DATA_DIR}/corpus_local/ads}"
+WEB_EMBD="${WEB_EMBD:-${DATA_DIR}/corpus_local/web}"
+SHOP_EMBD="${SHOP_EMBD:-${DATA_DIR}/corpus_local/shopping}"
 SEED=42
 RESULTS_DIR="${GPU_BASE}/results"
 
@@ -185,7 +188,11 @@ nohup bash -c "
     torchrun --nproc_per_node=1 \\
         src/hstu_retrieval/main.py \\
         --gin_config_file=PR-validation/configs/${config} \\
-        --mode=local \\
+        --mode=job \\
+        --data_path=${DATA_DIR} \\
+        --ads_semantic_embd_path=${ADS_EMBD} \\
+        --web_browsing_semantic_embd_path=${WEB_EMBD} \\
+        --shopping_semantic_embd_path=${SHOP_EMBD} \\
         2>&1
 " > ${logfile} 2>&1 &
 
@@ -209,7 +216,11 @@ nohup bash -c "
     torchrun --nproc_per_node=2 \\
         src/hstu_retrieval/main.py \\
         --gin_config_file=PR-validation/configs/${config} \\
-        --mode=local \\
+        --mode=job \\
+        --data_path=${DATA_DIR} \\
+        --ads_semantic_embd_path=${ADS_EMBD} \\
+        --web_browsing_semantic_embd_path=${WEB_EMBD} \\
+        --shopping_semantic_embd_path=${SHOP_EMBD} \\
         2>&1
 " > ${logfile} 2>&1 &
 
