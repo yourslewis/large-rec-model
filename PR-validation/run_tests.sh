@@ -184,7 +184,7 @@ nohup bash -c "
     CUDA_VISIBLE_DEVICES=0 \\
     torchrun --nproc_per_node=1 \\
         src/hstu_retrieval/main.py \\
-        --gin_config_file=src/hstu_retrieval/configs/${config} \\
+        --gin_config_file=PR-validation/configs/${config} \\
         --mode=local \\
         2>&1
 " > ${logfile} 2>&1 &
@@ -208,7 +208,7 @@ nohup bash -c "
     CUDA_VISIBLE_DEVICES=0,1 \\
     torchrun --nproc_per_node=2 \\
         src/hstu_retrieval/main.py \\
-        --gin_config_file=src/hstu_retrieval/configs/${config} \\
+        --gin_config_file=PR-validation/configs/${config} \\
         --mode=local \\
         2>&1
 " > ${logfile} 2>&1 &
