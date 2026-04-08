@@ -248,6 +248,7 @@ class Trainer:
                 raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
                 ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
                 timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
+                type_ids = row["type_ids"].to(self.device, non_blocking=True) if "type_ids" in row else None                           # [B, N]
                 lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
                 new_input_ids = input_ids[:, :-1]                            # [B, N-1]
@@ -256,6 +257,7 @@ class Trainer:
                 raw_label_embeddings     = raw_input_embeddings[:, 1:, :]    # [B, N-1, D]
                 new_ratings = ratings                                # ignore ratings for now
                 new_timestamps = timestamps[:, :-1]                          # [B, N-1]
+                new_type_ids = type_ids[:, :-1] if type_ids is not None else None  # [B, N-1]
                 new_lengths = lengths - 1                                    # [B]
 
                 # print(f"new input ids shape: {new_input_ids.shape}")
@@ -289,6 +291,7 @@ class Trainer:
                     label_ids=label_ids,
                     raw_label_embeddings=raw_label_embeddings,
                     ratings=new_ratings,
+                    type_ids=new_type_ids,
                     timestamps=new_timestamps,
                     user_ids=user_id,
                 )
@@ -391,6 +394,7 @@ class Trainer:
             raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
             ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
             timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
+            type_ids = row["type_ids"].to(self.device, non_blocking=True) if "type_ids" in row else None                           # [B, N]
             lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
 
@@ -402,7 +406,8 @@ class Trainer:
                 ratings,
                 timestamps,
                 lengths,
-                user_id
+                user_id,
+                type_ids=type_ids,
             )
 
             for k, v in eval_dict.items():

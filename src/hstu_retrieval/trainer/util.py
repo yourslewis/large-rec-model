@@ -157,6 +157,7 @@ class SequentialRetrieval(torch.nn.Module):
         self.domain_offset = dataset.domain_offset
         self.shard_size = dataset.shard_size
         self.shard_counts = dataset.shard_counts
+        self.num_event_types = getattr(dataset, 'num_event_types', 0)
         self.pinsage_ckpt_path = pinsage_ckpt_path
 
         # Supervision config (defaults match legacy behavior: domain 0 weighted 32x)
@@ -259,6 +260,7 @@ class SequentialRetrieval(torch.nn.Module):
                 max_sequence_len=self.max_sequence_length,
                 embedding_dim=self.item_embedding_dim,
                 dropout_rate=self.dropout_rate,
+                num_event_types=self.num_event_types,
             )
 
         # Optional projection: item_embedding_dim → model_hidden_size
@@ -381,6 +383,7 @@ class SequentialRetrieval(torch.nn.Module):
         label_ids: torch.Tensor,
         raw_label_embeddings: torch.Tensor,
         ratings: torch.Tensor = None,
+        type_ids: torch.Tensor = None,
         timestamps: torch.Tensor = None,
         user_ids: torch.Tensor = None,   
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -409,7 +412,7 @@ class SequentialRetrieval(torch.nn.Module):
             past_lengths=input_lengths,
             past_ids=input_ids,
             past_embeddings=past_embeddings,
-            past_payloads={"timestamps": timestamps, "ratings": ratings},                                      # past_ratings, (past_timestamps + 1)
+            past_payloads={"timestamps": timestamps, "ratings": ratings, "type_ids": type_ids},                                      # past_ratings, (past_timestamps + 1)
         )
         # logging.info(f"seq_embeddings shape {seq_embeddings.shape}")                     # [128, 211, 50]
 

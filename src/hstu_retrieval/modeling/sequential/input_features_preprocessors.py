@@ -328,7 +328,7 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
         B, N = past_ids.size()
 
         # Fuse item embeddings with event type embeddings
-        event_types = past_payloads.get("event_types", torch.zeros(B, N, dtype=torch.long, device=past_ids.device))
+        event_types = past_payloads.get("type_ids", torch.zeros(B, N, dtype=torch.long, device=past_ids.device))
         event_emb = self._event_type_emb(event_types.long())  # [B, N, event_dim]
         concat_emb = torch.cat([past_embeddings, event_emb], dim=-1)  # [B, N, D + event_dim]
         fused_emb = self._fusion_proj(concat_emb)  # [B, N, D]
