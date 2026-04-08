@@ -307,6 +307,9 @@ class TrainerConfig:
     num_epochs: int = 5
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
+    optimizer_type: str = "AdamW"  # "AdamW" | "Adam" | "SGD"
+    optimizer_betas: Tuple[float, float] = (0.9, 0.98)
+    scheduler_type: str = "none"  # "none" | "cosine" | "linear_warmup_cosine"
     num_warmup_steps: int = 0
     main_module_bf16: bool = False
     enable_tf32: bool = True

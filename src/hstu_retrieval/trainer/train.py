@@ -100,6 +100,9 @@ class Trainer:
         random_seed: int = 42,             # set to be 42
         eval_method: str = "pplx",  # "pplx" | "retrieval" | "sharded"
         eval_max_batches: int = 100,
+        optimizer_type: str = "AdamW",
+        optimizer_betas: tuple = (0.9, 0.98),
+        scheduler_type: str = "none",  # "none" | "cosine" | "linear_warmup_cosine"
     ):
         self.local_rank = local_rank
         self.device = local_rank
@@ -130,6 +133,9 @@ class Trainer:
         self.random_seed = random_seed
         self.eval_method = eval_method
         self.eval_max_batches = eval_max_batches
+        self.optimizer_type = optimizer_type
+        self.optimizer_betas = optimizer_betas
+        self.scheduler_type = scheduler_type
 
         # Setup and initialization
         self.setup()
@@ -180,13 +186,8 @@ class Trainer:
             collate_fn=collate_fn,
         )
 
-        # TODO: wrap in create_optimizer.
-        self.opt = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.learning_rate,              # set to be 1e-3
-            betas=(0.9, 0.98),
-            weight_decay=self.weight_decay,     # set to be 0
-        )
+        # Config-driven optimizer
+        self.opt = self._create_optimizer()
 
         if self.ckpt_path and self.rank == 0:
             os.makedirs(self.snapshot_dir, exist_ok=True)
@@ -347,6 +348,30 @@ class Trainer:
         else:
             logging.warning(f"Unknown eval_method '{self.eval_method}', falling back to pplx")
             self.run_evaluation_with_pplx(train_batch_id, train_epoch)
+
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Config-driven optimizer factory."""
+        params = self.model.parameters()
+        if self.optimizer_type == "AdamW":
+            return torch.optim.AdamW(
+                params, lr=self.learning_rate,
+                betas=self.optimizer_betas,
+                weight_decay=self.weight_decay,
+            )
+        elif self.optimizer_type == "Adam":
+            return torch.optim.Adam(
+                params, lr=self.learning_rate,
+                betas=self.optimizer_betas,
+                weight_decay=self.weight_decay,
+            )
+        elif self.optimizer_type == "SGD":
+            return torch.optim.SGD(
+                params, lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+                momentum=0.9,
+            )
+        else:
+            raise ValueError(f"Unknown optimizer_type: {self.optimizer_type}")
 
     def run_evaluation_with_pplx(self, train_batch_id, train_epoch) -> None:
         self.model.eval()
