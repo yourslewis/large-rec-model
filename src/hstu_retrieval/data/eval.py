@@ -138,7 +138,7 @@ def eval_metrics_v2_from_tensors(
         past_ids=input_ids,
         # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
         past_embeddings=past_embeddings,
-        past_payloads={"timestamps": timestamps, 'ratings': ratings},                                  # past_ratings, (past_timestamps + 1)
+        past_payloads={"timestamps": timestamps, 'ratings': ratings, 'type_ids': type_ids},                                  # past_ratings, (past_timestamps + 1)
     )
     if dtype is not None:                                                  # default to be None
         shared_input_embeddings = shared_input_embeddings.to(dtype)
@@ -349,6 +349,7 @@ def eval_metrics_v3_from_tensors(
         raw_label_embeddings,
         new_timestamps,
         new_lengths,
+        new_type_ids,
     )
     metrics.update(recall_metrics)
 
