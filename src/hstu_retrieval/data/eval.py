@@ -110,7 +110,8 @@ def eval_metrics_v2_from_tensors(
     label_ids: torch.Tensor, 
     raw_label_embeddings: torch.Tensor, 
     timestamps: torch.Tensor,                      
-    lengths: torch.Tensor,                           
+    lengths: torch.Tensor,
+    type_ids: torch.Tensor = None,
     filter_invalid_ids: bool = False,                # default to be true
     user_max_batch_size: Optional[int] = None,      # default to be None
     dtype: Optional[torch.dtype] = None,            # default to be None
