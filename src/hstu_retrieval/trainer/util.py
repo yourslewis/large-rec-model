@@ -258,7 +258,8 @@ class SequentialRetrieval(torch.nn.Module):
         elif self.input_preproc_module_type == "LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor":
             input_preproc_module = LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
                 max_sequence_len=self.max_sequence_length,
-                embedding_dim=self.item_embedding_dim,
+                item_embedding_dim=self.item_embedding_dim,
+                model_hidden_size=self.model_hidden_size,
                 dropout_rate=self.dropout_rate,
                 num_event_types=self.num_event_types,
             )
