@@ -26,13 +26,22 @@ import logging
 
 
 def _worker_init_fn(worker_id: int) -> None:
-    """Ensure each DataLoader worker gets a unique random seed.
+    """Initialize each DataLoader worker with a unique seed and zombie prevention.
 
-    Without this, every worker in an IterableDataset pipeline starts with
-    the same base seed, which can cause duplicate samples across workers
-    and across DDP ranks.  We mix in the worker id *and* the DDP rank so
-    that every (rank, worker) pair is unique.
+    1. Sets PR_SET_PDEATHSIG so workers are killed when the parent dies,
+       preventing zombie processes that can exhaust system RAM.
+    2. Seeds each worker uniquely to avoid duplicate samples across workers
+       and DDP ranks.
     """
+    # Prevent zombie workers: auto-SIGTERM when parent dies (Linux only)
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, 15)  # SIGTERM on parent death
+    except Exception:
+        pass  # Non-Linux platforms
+
     worker_info = torch.utils.data.get_worker_info()
     base_seed = worker_info.seed  # set by PyTorch per-worker
     rank = int(os.environ.get("RANK", 0))
