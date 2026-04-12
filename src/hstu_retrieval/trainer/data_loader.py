@@ -19,8 +19,30 @@ from typing import Optional, Tuple
 from data.ads_datasets.buffered_shuffle import BufferedShuffleDataset
 
 import gin
+import numpy as np
+import random
 import torch
 import logging
+
+
+def _worker_init_fn(worker_id: int) -> None:
+    """Ensure each DataLoader worker gets a unique random seed.
+
+    Without this, every worker in an IterableDataset pipeline starts with
+    the same base seed, which can cause duplicate samples across workers
+    and across DDP ranks.  We mix in the worker id *and* the DDP rank so
+    that every (rank, worker) pair is unique.
+    """
+    worker_info = torch.utils.data.get_worker_info()
+    base_seed = worker_info.seed  # set by PyTorch per-worker
+    rank = int(os.environ.get("RANK", 0))
+    combined = base_seed + worker_id + rank * 1000
+    np.random.seed(combined % (2**32))
+    random.seed(combined)
+    torch.manual_seed(combined)
+    logging.debug(
+        "Worker %d (rank %d) seeded with %d", worker_id, rank, combined
+    )
 
 
 @gin.configurable
@@ -52,7 +74,8 @@ def create_data_loader(
         drop_last=drop_last,  # Drop the last incomplete batch if specified
         # prefetch_factor=prefetch_factor,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        worker_init_fn=_worker_init_fn if num_workers and num_workers > 0 else None,
     )
 
     return data_loader
