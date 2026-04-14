@@ -32,43 +32,19 @@ from typing import List, Optional, Dict, Tuple
 import logging
 import gin
 import fsspec
-from azureml.fsspec import AzureMachineLearningFileSystem
+try:
+    from azureml.fsspec import AzureMachineLearningFileSystem
+except ImportError:
+    AzureMachineLearningFileSystem = None
 
 SUBSCRIPTION = 'f920ee3b-6bdc-48c6-a487-9e0397b69322'
 RESOURCE_GROUP = 'msan-aml'
 WORKSPACE = 'msan-retrieval-ranking-aml'
 DATASTORE_NAME = 'bingads_algo_prod_networkprotection_c08'
 
-
-def _read_domain_offset_tsv(fs, prefix: str) -> pd.DataFrame:
-    """
-    Read the domain_offset TSV written by ids_creation_pipeline.py.
-    Spark writes it as a directory (domain_offset.tsv/part-00000, _SUCCESS).
-    Uses the same fs object as get_reco_dataset so Azure paths work in local mode.
-    Raises FileNotFoundError if the directory or part file is missing.
-    Returns the single-row DataFrame with all columns from the TSV.
-    """
-    tsv_dir = os.path.join(prefix, "domain_offset.tsv")
-    entries = fs.ls(tsv_dir)
-    part_files = [e for e in entries if os.path.basename(e).startswith("part-")]
-    if not part_files:
-        raise FileNotFoundError(f"No part file found in {tsv_dir}")
-    # Try each part file until we find one with data
-    # (Spark may write empty partition files alongside the real data)
-    for pf in part_files:
-        try:
-            with fs.open(pf, "r") as f:
-                df = pd.read_csv(f, delimiter="\t")
-            if not df.empty:
-                return df
-        except Exception:
-            continue
-    raise FileNotFoundError(f"No valid part file with data found in {tsv_dir}")
-
 @dataclass
 class RecoDataset:
     dataset_name: str
-    num_event_types: int
     max_sequence_length: int
     positional_sampling_ratio: float
     train_dataset: torch.utils.data.Dataset
@@ -81,6 +57,7 @@ class RecoDataset:
     min_item_id: int = 0
     max_item_id: int = 0
     num_ratings: int = 0
+    num_event_types: int = 0
 
 
 @gin.configurable
@@ -138,47 +115,17 @@ def get_reco_dataset(
         )
     elif dataset_name == "training_data_07082025":
         if experiment_name == "semantic_next_event_prediction":
-            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size) 
             eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
         elif experiment_name == "semantic_next_event_prediction_finetune_ads":
-            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "filetune_ads"), max_sequence_length, rank, world_size)
-            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "filetune_ads"), max_sequence_length, rank, world_size) 
+            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)            
         return RecoDataset(
             dataset_name=dataset_name,
             max_sequence_length=max_sequence_length,
-            domain_to_item_id_range={0: (20, 853_521_661), 1: (0, 790_114_583), 2: (0, 621_877_842)},
+            domain_to_item_id_range={0: (20, 853_521_661), 1: (0, 790_114_583), 2: (0, 621_877_842)},  
             embd_dim=64,  # robertta 768, pinsage 64
             domain_offset=1_000_000_000,
-            shard_size=25_000_000,
-            positional_sampling_ratio=positional_sampling_ratio,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-        )
-    elif dataset_name == "training_data_03312026":
-        if experiment_name == "semantic_next_event_prediction":
-            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
-            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
-        elif experiment_name == "semantic_next_event_prediction_finetune_ads":
-            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "filetune_ads"), max_sequence_length, rank, world_size)
-            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
-        else:
-            raise ValueError(
-                f"Unsupported experiment_name {experiment_name!r} for dataset_name 'training_data_03312026'"
-            )
-        offset_df = _read_domain_offset_tsv(fs, prefix)
-        domain_offset = int(offset_df["domain_offset"].iloc[0])
-        domain_to_item_id_range = {
-            0: (int(offset_df["ads_min_index"].iloc[0]),  int(offset_df["ads_max_index"].iloc[0])),
-            1: (int(offset_df["web_min_index"].iloc[0]),  int(offset_df["web_max_index"].iloc[0])),
-            2: (int(offset_df["shop_min_index"].iloc[0]), int(offset_df["shop_max_index"].iloc[0])),
-        }
-        logging.info(f"Read from domain_offset.tsv: domain_offset={domain_offset:,}, domain_to_item_id_range={domain_to_item_id_range}")
-        return RecoDataset(
-            dataset_name=dataset_name,
-            max_sequence_length=max_sequence_length,
-            domain_to_item_id_range=domain_to_item_id_range,
-            embd_dim=64,  # robertta 768, pinsage 64
-            domain_offset=domain_offset,
             shard_size=25_000_000,
             positional_sampling_ratio=positional_sampling_ratio,
             train_dataset=train_dataset,
@@ -188,31 +135,52 @@ def get_reco_dataset(
         if experiment_name == "semantic_next_event_prediction":
             train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size) 
             eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
-        else:
-            raise ValueError(
-                f"Unsupported experiment_name {experiment_name!r} for dataset_name 'training_data_11032025'"
-            )
-        offset_df = _read_domain_offset_tsv(fs, prefix)
-        domain_offset = int(offset_df["domain_offset"].iloc[0])
-        domain_to_item_id_range = {
-            0: (int(offset_df["ads_min_index"].iloc[0]),  int(offset_df["ads_max_index"].iloc[0])),
-            1: (int(offset_df["web_min_index"].iloc[0]),  int(offset_df["web_max_index"].iloc[0])),
-            2: (int(offset_df["shop_min_index"].iloc[0]), int(offset_df["shop_max_index"].iloc[0])),
-            # domain 3 (ads pure corpus): read from TSV if available, else fall back to hardcoded
-            3: (int(offset_df["pure_corpus_min_index"].iloc[0]), int(offset_df["pure_corpus_max_index"].iloc[0]))
-               if "pure_corpus_min_index" in offset_df.columns
-               else (0, 199_999_999),
-        }
-        logging.info(f"Read from domain_offset.tsv: domain_offset={domain_offset:,}, domain_to_item_id_range={domain_to_item_id_range}")
         return RecoDataset(
             dataset_name=dataset_name,
-            num_event_types= len(semantic_next_event_prediction.EVENT_TYPE_DICT)-1,
             max_sequence_length=max_sequence_length,
-            domain_to_item_id_range=domain_to_item_id_range,
+            domain_to_item_id_range={0: (20, 42_262_200), 1: (0, 301_422_400), 2: (0, 40_592_094), 3: (0, 199_999_999)},  
             embd_dim=64,  # robertta 768, pinsage 64
-            domain_offset=domain_offset,
+            domain_offset=1_000_000_000,
             shard_size=25_000_000,
-            shard_counts={0: 2, 1: 13, 2: 2, 3: 8},
+            shard_counts={0: 2, 1: 13, 2: 2, 3: 8},  
+            positional_sampling_ratio=positional_sampling_ratio,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    elif dataset_name == "astrov6":
+        if experiment_name == "semantic_next_event_prediction":
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
+            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
+        else:
+            raise ValueError(f"Unknown experiment {experiment_name} for dataset {dataset_name}")
+        return RecoDataset(
+            dataset_name=dataset_name,
+            max_sequence_length=max_sequence_length,
+            domain_to_item_id_range={0: (20, 42_262_200), 1: (0, 301_422_400), 2: (0, 40_592_094)},
+            embd_dim=64,
+            domain_offset=1_000_000_000,
+            shard_size=25_000_000,
+            shard_counts={0: 2, 1: 13, 2: 2},
+            num_event_types=len(semantic_next_event_prediction.EVENT_TYPE_DICT),
+            positional_sampling_ratio=positional_sampling_ratio,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+        )
+    elif dataset_name == "local_data":
+        if experiment_name == "semantic_next_event_prediction":
+            local_fs = fsspec.filesystem('file')
+            train_dataset = semantic_next_event_prediction.TrainIterableDataset(local_fs, os.path.join(prefix, "train"), max_sequence_length, rank, world_size)
+            eval_dataset = semantic_next_event_prediction.EvalIterableDataset(local_fs, os.path.join(prefix, "eval"), max_sequence_length, rank, world_size)
+        else:
+            raise ValueError(f"Unknown experiment {experiment_name} for dataset {dataset_name}")
+        return RecoDataset(
+            dataset_name=dataset_name,
+            max_sequence_length=max_sequence_length,
+            domain_to_item_id_range={0: (20, 999), 1: (0, 999), 2: (0, 999), 3: (0, 999)},
+            embd_dim=64,
+            domain_offset=1_000_000_000,
+            shard_size=1000,
+            shard_counts={0: 1, 1: 1, 2: 1, 3: 1},
             positional_sampling_ratio=positional_sampling_ratio,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,

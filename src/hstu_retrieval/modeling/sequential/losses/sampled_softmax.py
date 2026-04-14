@@ -26,6 +26,10 @@ from modeling.sequential.autoregressive_losses import (
 from torch.utils.checkpoint import checkpoint
 
 
+from registry import register
+
+
+@register("loss", "SampledSoftmaxLoss")
 class SampledSoftmaxLoss(AutoregressiveLoss):
     def __init__(
         self,

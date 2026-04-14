@@ -45,24 +45,29 @@ from indexing.utils import get_top_k_module
 from trainer.data_loader import create_data_loader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-import mlflow
+try:
+    import mlflow
+    HAS_MLFLOW = True
+except ImportError:
+    HAS_MLFLOW = False
 from collections import defaultdict
 import shutil
 
 _original_add_scalar = SummaryWriter.add_scalar
 
-def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
-    # Call original function
-    _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
-    
-    # Log to MLflow
-    if global_step is not None:
-        mlflow.log_metric(tag, scalar_value, step=global_step)
-    else:
-        mlflow.log_metric(tag, scalar_value)
+if HAS_MLFLOW:
+    def patched_add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
+        # Call original function
+        _original_add_scalar(self, tag, scalar_value, global_step, *args, **kwargs)
 
-# Patch the method
-SummaryWriter.add_scalar = patched_add_scalar
+        # Log to MLflow
+        if global_step is not None:
+            mlflow.log_metric(tag, scalar_value, step=global_step)
+        else:
+            mlflow.log_metric(tag, scalar_value)
+
+    # Patch the method
+    SummaryWriter.add_scalar = patched_add_scalar
 
 
 
@@ -93,6 +98,11 @@ class Trainer:
         save_ckpt_every_n: int = 10,
         enable_tf32: bool = False,         # set to be True
         random_seed: int = 42,             # set to be 42
+        eval_method: str = "pplx",  # "pplx" | "retrieval" | "sharded"
+        eval_max_batches: int = 100,
+        optimizer_type: str = "AdamW",
+        optimizer_betas: tuple = (0.9, 0.98),
+        scheduler_type: str = "none",  # "none" | "cosine" | "linear_warmup_cosine"
     ):
         self.local_rank = local_rank
         self.device = local_rank
@@ -121,6 +131,11 @@ class Trainer:
         self.save_ckpt_every_n = save_ckpt_every_n
         self.enable_tf32 = enable_tf32
         self.random_seed = random_seed
+        self.eval_method = eval_method
+        self.eval_max_batches = eval_max_batches
+        self.optimizer_type = optimizer_type
+        self.optimizer_betas = optimizer_betas
+        self.scheduler_type = scheduler_type
 
         # Setup and initialization
         self.setup()
@@ -146,16 +161,15 @@ class Trainer:
 
         collate_fn = CollateFn(
             device=self.device,
+            domain_to_item_id_range=self.dataset.domain_to_item_id_range,
             precomputed_embeddings_domain_to_dir=self.model.precomputed_embeddings_domain_to_dir,
-            item_embedding_dim=self.model.item_embedding_dim,
-            dataset=self.dataset,
+            domain_offset=self.dataset.domain_offset,
         )
         self.train_data_loader = create_data_loader(
             self.dataset.train_dataset,
             batch_size=self.local_batch_size,     # set to be 128
             world_size=self.world_size,      
             rank=self.rank,
-            mode="train",
             shuffle=True,
             drop_last=self.world_size > 1, 
             random_seed=self.random_seed,
@@ -166,20 +180,14 @@ class Trainer:
             batch_size=self.eval_batch_size,      # default to be 128
             world_size=self.world_size,
             rank=self.rank,
-            mode="eval",
-            shuffle=False,     
+            shuffle=True,     
             drop_last=self.world_size > 1,
             random_seed=self.random_seed,
             collate_fn=collate_fn,
         )
 
-        # TODO: wrap in create_optimizer.
-        self.opt = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.learning_rate,              # set to be 1e-3
-            betas=(0.9, 0.98),
-            weight_decay=self.weight_decay,     # set to be 0
-        )
+        # Config-driven optimizer
+        self.opt = self._create_optimizer()
 
         if self.ckpt_path and self.rank == 0:
             os.makedirs(self.snapshot_dir, exist_ok=True)
@@ -238,16 +246,18 @@ class Trainer:
                 user_id = row["user_id"]
                 input_ids = row["input_ids"].to(self.device, non_blocking=True)                                                    # [B, N]
                 raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
-                type_ids = row["type_ids"].to(self.device, non_blocking=True)                                                 # [B, N]                                                        # [B, N]
+                ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
                 timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
+                type_ids = row["type_ids"].to(self.device, non_blocking=True) if "type_ids" in row else None                           # [B, N]
                 lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
                 new_input_ids = input_ids[:, :-1]                            # [B, N-1]
                 label_ids     = input_ids[:, 1:]                             # [B, N-1]
                 new_raw_input_embeddings = raw_input_embeddings[:, :-1, :]   # [B, N-1, D]
                 raw_label_embeddings     = raw_input_embeddings[:, 1:, :]    # [B, N-1, D]
-                new_type_ids = type_ids[:, :-1]                              # [B, N-1]
+                new_ratings = ratings                                # ignore ratings for now
                 new_timestamps = timestamps[:, :-1]                          # [B, N-1]
+                new_type_ids = type_ids[:, :-1] if type_ids is not None else None  # [B, N-1]
                 new_lengths = lengths - 1                                    # [B]
 
                 # print(f"new input ids shape: {new_input_ids.shape}")
@@ -262,10 +272,10 @@ class Trainer:
                     logging.info("rotating negatives sampler")
                     self.model.module.negatives_sampler['eval'].rotate()
 
-                    logging.info("running evaluation for ads log perplexity")
+                    logging.info(f"running evaluation (method={self.eval_method})")
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                    self.run_evaluation_with_pplx(
+                    self.evaluate(
                         batch_id, 
                         epoch
                     )
@@ -280,6 +290,7 @@ class Trainer:
                     input_lengths=new_lengths,
                     label_ids=label_ids,
                     raw_label_embeddings=raw_label_embeddings,
+                    ratings=new_ratings,
                     type_ids=new_type_ids,
                     timestamps=new_timestamps,
                     user_ids=user_id,
@@ -323,6 +334,48 @@ class Trainer:
         self.cleanup()
 
 
+    def evaluate(self, train_batch_id: int, train_epoch: int) -> None:
+        """Unified evaluation dispatcher — routes to the configured eval method.
+
+        eval_method:
+            "pplx"      — log perplexity eval (eval_metrics_v3, fast)
+            "retrieval"  — single-domain retrieval eval (eval_metrics_v2)
+            "sharded"    — sharded multi-rank retrieval eval
+        """
+        if self.eval_method == "pplx":
+            self.run_evaluation_with_pplx(train_batch_id, train_epoch)
+        elif self.eval_method == "sharded":
+            self.run_sharded_evaluation(train_batch_id, train_epoch)
+        elif self.eval_method == "retrieval":
+            self.run_evaluation(train_batch_id, train_epoch)
+        else:
+            logging.warning(f"Unknown eval_method '{self.eval_method}', falling back to pplx")
+            self.run_evaluation_with_pplx(train_batch_id, train_epoch)
+
+    def _create_optimizer(self) -> torch.optim.Optimizer:
+        """Config-driven optimizer factory."""
+        params = self.model.parameters()
+        if self.optimizer_type == "AdamW":
+            return torch.optim.AdamW(
+                params, lr=self.learning_rate,
+                betas=self.optimizer_betas,
+                weight_decay=self.weight_decay,
+            )
+        elif self.optimizer_type == "Adam":
+            return torch.optim.Adam(
+                params, lr=self.learning_rate,
+                betas=self.optimizer_betas,
+                weight_decay=self.weight_decay,
+            )
+        elif self.optimizer_type == "SGD":
+            return torch.optim.SGD(
+                params, lr=self.learning_rate,
+                weight_decay=self.weight_decay,
+                momentum=0.9,
+            )
+        else:
+            raise ValueError(f"Unknown optimizer_type: {self.optimizer_type}")
+
     def run_evaluation_with_pplx(self, train_batch_id, train_epoch) -> None:
         self.model.eval()
 
@@ -339,8 +392,9 @@ class Trainer:
             user_id = row["user_id"]
             input_ids = row["input_ids"].to(self.device, non_blocking=True)                                                    # [B, N]
             raw_input_embeddings = row["raw_input_embeddings"].to(dtype=torch.float32, device=self.device, non_blocking=True)  # [B, N, D]
-            type_ids = row["type_ids"].to(self.device, non_blocking=True)                                                      # [B, N]
+            ratings = row["ratings"].to(self.device, non_blocking=True)                                                        # [B, N]
             timestamps = row["timestamps"].to(self.device, non_blocking=True)                                                  # [B, N]
+            type_ids = row["type_ids"].to(self.device, non_blocking=True) if "type_ids" in row else None                           # [B, N]
             lengths = row["lengths"].to(self.device, non_blocking=True)                                                        # [B]
 
 
@@ -349,17 +403,18 @@ class Trainer:
                 self.model.module,
                 input_ids,
                 raw_input_embeddings,
-                type_ids,
+                ratings,
                 timestamps,
                 lengths,
-                user_id
+                user_id,
+                type_ids=type_ids,
             )
 
             for k, v in eval_dict.items():
                 eval_dict_all[k].append(v)
 
             batch_id += 1
-            if batch_id>100:
+            if batch_id >= self.eval_max_batches:
                 break
 
         assert eval_dict_all is not None
@@ -477,7 +532,7 @@ class Trainer:
             batch_id += 1
 
             logging.info(f"eval @ 'eval iteration' {batch_id} ")
-            if batch_id>=50:
+            if batch_id >= self.eval_max_batches:
                 break
 
         # Merge metric tensors per rank
@@ -620,7 +675,11 @@ class Trainer:
 
         latest_snapshot = checkpoint_files[-1]
         logging.info(f"Loading latest snapshot: {latest_snapshot}")
-        snapshot = torch.load(latest_snapshot, map_location="cpu")
+        try:
+            snapshot = torch.load(latest_snapshot, map_location="cpu")
+        except Exception as e:
+            logging.warning(f"Failed to load snapshot {latest_snapshot}: {e}. Starting fresh.")
+            return False
 
         self.model.load_state_dict(snapshot["MODEL_STATE"])
         self.opt.load_state_dict(snapshot["OPTIMIZER_STATE"])

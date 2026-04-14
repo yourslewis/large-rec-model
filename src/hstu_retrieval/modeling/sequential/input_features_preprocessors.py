@@ -21,6 +21,7 @@ from typing import Dict, Tuple
 import torch
 
 from modeling.initialization import truncated_normal
+from registry import register
 
 
 class InputFeaturesPreprocessorModule(torch.nn.Module):
@@ -39,6 +40,7 @@ class InputFeaturesPreprocessorModule(torch.nn.Module):
         pass
 
 
+@register("preprocessor", "LearnablePositionalEmbeddingInputFeaturesPreprocessor")
 class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
@@ -51,7 +53,6 @@ class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
         super().__init__()
 
         self._embedding_dim: int = embedding_dim
-        self._hidden_size: int = embedding_dim
         self._pos_emb: torch.nn.Embedding = torch.nn.Embedding(
             max_sequence_len,
             self._embedding_dim,
@@ -90,6 +91,7 @@ class LearnablePositionalEmbeddingInputFeaturesPreprocessor(
         return past_lengths, user_embeddings, valid_mask
 
 
+@register("preprocessor", "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor")
 class LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
@@ -154,68 +156,7 @@ class LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
         return past_lengths, user_embeddings, valid_mask
 
 
-class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(InputFeaturesPreprocessorModule):
-    def __init__(
-        self,
-        max_sequence_len: int,
-        item_embedding_dim: int,
-        model_hidden_size: int,
-        dropout_rate: float,
-        num_event_types: int,
-    ) -> None:
-        super().__init__()
-
-        self._embedding_dim: int = item_embedding_dim
-        self._hidden_size: int = model_hidden_size       # this is the model hidden_size
-
-        if self._hidden_size != self._embedding_dim:
-            self._fc = torch.nn.Linear(item_embedding_dim, model_hidden_size)
-        else:
-            self._fc = torch.nn.Identity()
-        self._pos_emb: torch.nn.Embedding = torch.nn.Embedding(
-            max_sequence_len,
-            self._hidden_size,
-        )
-        self._event_type_emb: torch.nn.Embedding = torch.nn.Embedding(
-            num_event_types+1,
-            self._hidden_size,
-        )
-        self._dropout_rate: float = dropout_rate
-        self._emb_dropout = torch.nn.Dropout(p=dropout_rate)
-        self.reset_state()
-
-    def debug_str(self) -> str:
-        return f"posir_d{self._dropout_rate}"
-
-    def reset_state(self) -> None:
-        truncated_normal(
-            self._pos_emb.weight.data,
-            mean=0.0,
-            std=math.sqrt(1.0 / self._hidden_size),
-        )
-        truncated_normal(
-            self._event_type_emb.weight.data,
-            mean=0.0,
-            std=math.sqrt(1.0 / self._hidden_size),
-        )
-
-    def forward(
-        self,
-        past_lengths: torch.Tensor,
-        past_ids: torch.Tensor,
-        past_embeddings: torch.Tensor,
-        past_payloads: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        B, N = past_ids.size()
-        assert past_embeddings.size(-1) == self._embedding_dim, "Embedding dimension mismatch."
-        user_embeddings = self._fc(past_embeddings) + self._pos_emb(torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1)) + self._event_type_emb(past_payloads["type_ids"].int())
-        user_embeddings = self._emb_dropout(user_embeddings)
-
-        valid_mask = (past_ids != 0).unsqueeze(-1).float()  # [B, N, 1]
-        user_embeddings *= valid_mask
-        return past_lengths, user_embeddings, valid_mask
-
-
+@register("preprocessor", "CombinedItemAndRatingInputFeaturesPreprocessor")
 class CombinedItemAndRatingInputFeaturesPreprocessor(InputFeaturesPreprocessorModule):     # for ranking task, need to revisit
     def __init__(
         self,
@@ -322,3 +263,80 @@ class CombinedItemAndRatingInputFeaturesPreprocessor(InputFeaturesPreprocessorMo
         )  # (B, N * 2, 1,)
         user_embeddings *= valid_mask
         return past_lengths * 2, user_embeddings, valid_mask
+
+
+@register("preprocessor", "LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor")
+class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
+    InputFeaturesPreprocessorModule
+):
+    """Preprocessor that fuses event type embeddings with item embeddings
+    using additive fusion before adding positional encoding.
+
+    Matches upstream architecture:
+    - Optional linear projection: item_embedding_dim -> model_hidden_size
+    - Event type embedding at full model_hidden_size
+    - Additive fusion: fc(item_emb) + event_type_emb + pos_emb
+    - num_event_types+1 to account for padding (index 0)
+
+    Event types are expected in past_payloads["type_ids"] as integer tensor [B, N].
+    """
+
+    def __init__(
+        self,
+        max_sequence_len: int,
+        item_embedding_dim: int,
+        model_hidden_size: int,
+        dropout_rate: float,
+        num_event_types: int,
+    ) -> None:
+        super().__init__()
+
+        self._embedding_dim: int = item_embedding_dim
+        self._hidden_size: int = model_hidden_size
+
+        if self._hidden_size != self._embedding_dim:
+            self._fc = torch.nn.Linear(item_embedding_dim, model_hidden_size)
+        else:
+            self._fc = torch.nn.Identity()
+        self._pos_emb: torch.nn.Embedding = torch.nn.Embedding(
+            max_sequence_len,
+            self._hidden_size,
+        )
+        self._event_type_emb: torch.nn.Embedding = torch.nn.Embedding(
+            num_event_types + 1,
+            self._hidden_size,
+        )
+        self._dropout_rate: float = dropout_rate
+        self._emb_dropout = torch.nn.Dropout(p=dropout_rate)
+        self.reset_state()
+
+    def debug_str(self) -> str:
+        return f"posir_d{self._dropout_rate}"
+
+    def reset_state(self) -> None:
+        truncated_normal(
+            self._pos_emb.weight.data,
+            mean=0.0,
+            std=math.sqrt(1.0 / self._hidden_size),
+        )
+        truncated_normal(
+            self._event_type_emb.weight.data,
+            mean=0.0,
+            std=math.sqrt(1.0 / self._hidden_size),
+        )
+
+    def forward(
+        self,
+        past_lengths: torch.Tensor,
+        past_ids: torch.Tensor,
+        past_embeddings: torch.Tensor,
+        past_payloads: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        B, N = past_ids.size()
+        assert past_embeddings.size(-1) == self._embedding_dim, "Embedding dimension mismatch."
+        user_embeddings = self._fc(past_embeddings) + self._pos_emb(torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1)) + self._event_type_emb(past_payloads["type_ids"].int())
+        user_embeddings = self._emb_dropout(user_embeddings)
+
+        valid_mask = (past_ids != 0).unsqueeze(-1).float()  # [B, N, 1]
+        user_embeddings *= valid_mask
+        return past_lengths, user_embeddings, valid_mask

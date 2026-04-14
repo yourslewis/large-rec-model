@@ -18,7 +18,8 @@ import abc
 
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
+
+from registry import register
 
 
 class OutputPostprocessorModule(torch.nn.Module):
@@ -34,37 +35,32 @@ class OutputPostprocessorModule(torch.nn.Module):
         pass
 
 
+@register("postprocessor", "l2_norm")
 class L2NormEmbeddingPostprocessor(OutputPostprocessorModule):
     def __init__(
         self,
-        model_hidden_size: int,
         embedding_dim: int,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
-        self._hidden_size: int = model_hidden_size
         self._embedding_dim: int = embedding_dim
         self._eps: float = eps
 
-        if self._hidden_size != self._embedding_dim:
-            self._proj = nn.Linear(self._hidden_size, self._embedding_dim, bias=False)
-        else:
-            self._proj = nn.Identity()
-
-    def debug_str(self) -> str: 
+    def debug_str(self) -> str:
         return "l2"
 
     def forward(
         self,
         output_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        output_embeddings = self._proj(output_embeddings)
+        output_embeddings = output_embeddings[..., : self._embedding_dim]
         return output_embeddings / torch.clamp(
             torch.linalg.norm(output_embeddings, ord=None, dim=-1, keepdim=True),
             min=self._eps,
         )
 
 
+@register("postprocessor", "layer_norm")
 class LayerNormEmbeddingPostprocessor(OutputPostprocessorModule):
     def __init__(
         self,

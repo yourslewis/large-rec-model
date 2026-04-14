@@ -3,8 +3,12 @@ import torch
 from typing import List, Optional, Tuple, Dict
 from modeling.sequential.embedding_modules import EmbeddingModule
 import torch.distributed as dist
+from modeling.sequential.utils import (
+    pack_and_all_gather,
+)
 import gc
 import logging
+from registry import register
 
 class NegativesSampler(torch.nn.Module):
     def __init__(self, l2_norm: bool, l2_norm_eps: float) -> None:
@@ -51,6 +55,7 @@ class NegativesSampler(torch.nn.Module):
         pass
 
 
+@register("sampler", "local")
 class LocalNegativesSampler(NegativesSampler):
     def __init__(
         self,
@@ -104,6 +109,7 @@ class LocalNegativesSampler(NegativesSampler):
         return sampled_ids, self.normalize_embeddings(self._item_emb(sampled_ids))
 
 
+@register("sampler", "InBatch")
 class InBatchNegativesSampler(NegativesSampler):
     """
     In-batch negatives sampler for contrastive training (e.g., InfoNCE).
@@ -183,7 +189,12 @@ class InBatchNegativesSampler(NegativesSampler):
             )
         
         if self.cross_rank:
-            raise NotImplementedError("This logic is not implemented yet")
+            rank = dist.get_rank()
+            self.batch_size = ids.size(0)
+            self._cached_seq_ids += rank * self.batch_size
+            self._cached_ids, self._cached_seq_ids, self._cached_embeddings = pack_and_all_gather(
+                self._cached_ids, self._cached_seq_ids, self._cached_embeddings
+            )
 
     def get_all_ids_and_embeddings(self) -> Tuple[torch.Tensor, torch.Tensor]:
         return self._cached_ids, self._cached_embeddings  # pyre-ignore [7]
@@ -219,6 +230,7 @@ class InBatchNegativesSampler(NegativesSampler):
         )
 
 
+@register("sampler", "RotateInDomainGlobalNegativesSampler")
 class RotateInDomainGlobalNegativesSampler(NegativesSampler):
     def __init__(self, item_emb: EmbeddingModule, domain_offset: int, shard_size: int, shard_counts: Dict[int, int], l2_norm: bool, l2_norm_eps: float) -> None:
         super().__init__(l2_norm=l2_norm, l2_norm_eps=l2_norm_eps)
@@ -227,8 +239,11 @@ class RotateInDomainGlobalNegativesSampler(NegativesSampler):
         self.shard_size: int = shard_size
         self.shard_counts: Dict[int, int] = shard_counts
         self.pools: Dict[int, Tuple[int, Tuple[torch.Tensor, torch.Tensor]]] = {}   # domain_id -> (current_shard_idx, (index_tensor, embedding_tensor))
-        # TODO: move this mapping to config
-        self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 0.5), (3, 0.5)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
+        # Build domain_pools_map based on available shard_counts
+        if 3 in shard_counts:
+            self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 0.5), (3, 0.5)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
+        else:
+            self.domain_pools_map: Dict[int, List[int]] = { 0: [(0, 1.0)], 1: [(1, 1.0)], 2: [(2, 1.0)] }
 
     def debug_str(self) -> str:
         sampling_debug_str = (
@@ -335,6 +350,7 @@ class RotateInDomainGlobalNegativesSampler(NegativesSampler):
         return sampled_ids, sampled_negative_embeddings
     
 
+@register("sampler", "Hybrid")
 class HybridNegativesSampler(NegativesSampler):
     """
     Hybrid negatives sampler that combines in-batch and rotate-based global negative sampling.

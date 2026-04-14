@@ -106,11 +106,12 @@ def eval_metrics_v2_from_tensors(
     model: SimilarityModule,                        # type is wrong
     input_ids: torch.Tensor,   
     raw_input_embeddings: torch.Tensor,  
-    type_ids: torch.Tensor,                         
+    ratings: torch.Tensor,                         
     label_ids: torch.Tensor, 
     raw_label_embeddings: torch.Tensor, 
     timestamps: torch.Tensor,                      
-    lengths: torch.Tensor,                           
+    lengths: torch.Tensor,
+    type_ids: torch.Tensor = None,
     filter_invalid_ids: bool = False,                # default to be true
     user_max_batch_size: Optional[int] = None,      # default to be None
     dtype: Optional[torch.dtype] = None,            # default to be None
@@ -138,7 +139,7 @@ def eval_metrics_v2_from_tensors(
         past_ids=input_ids,
         # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
         past_embeddings=past_embeddings,
-        past_payloads={"timestamps": timestamps, 'type_ids': type_ids},                                  # past_ratings, (past_timestamps + 1)
+        past_payloads={"timestamps": timestamps, 'ratings': ratings, 'type_ids': type_ids},                                  # past_ratings, (past_timestamps + 1)
     )
     if dtype is not None:                                                  # default to be None
         shared_input_embeddings = shared_input_embeddings.to(dtype)
@@ -302,18 +303,20 @@ def eval_metrics_v3_from_tensors(
     model: torch.nn.Module,                       
     input_ids: torch.Tensor,   
     raw_input_embeddings: torch.Tensor,  
-    type_ids: torch.Tensor,                                                   
+    ratings: torch.Tensor,                                                   
     timestamps: torch.Tensor,                      
     lengths: torch.Tensor,     
-    user_ids,                       
+    user_ids,
+    type_ids: torch.Tensor = None,
 ) -> Dict[str, Union[float, torch.Tensor]]: 
     
     new_input_ids = input_ids[:, :-1]                            # [B, N-1]
     label_ids     = input_ids[:, 1:]                             # [B, N-1]
     new_raw_input_embeddings = raw_input_embeddings[:, :-1, :]   # [B, N-1, D]
     raw_label_embeddings     = raw_input_embeddings[:, 1:, :]    # [B, N-1, D]
-    new_type_ids = type_ids[:, :-1]
+    new_ratings = ratings                                        # ignore ratings for now
     new_timestamps = timestamps[:, :-1]                          # [B, N-1]
+    new_type_ids = type_ids[:, :-1] if type_ids is not None else None  # [B, N-1]
     new_lengths = lengths - 1                                    # [B]
 
     logits, loss, metrics = model(
@@ -322,6 +325,7 @@ def eval_metrics_v3_from_tensors(
         input_lengths=new_lengths,
         label_ids=label_ids,
         raw_label_embeddings=raw_label_embeddings,
+        ratings=new_ratings,
         type_ids=new_type_ids,
         timestamps=new_timestamps,
         user_ids=user_ids,
@@ -333,7 +337,7 @@ def eval_metrics_v3_from_tensors(
     label_ids = input_ids[torch.arange(input_ids.size(0)), lengths - 1]                                                            # [B]
     new_raw_input_embeddings = raw_input_embeddings[:, :-1, :]                                                                     # [B, N-1, D]
     raw_label_embeddings = raw_input_embeddings[torch.arange(input_ids.size(0)), lengths - 1, :]                                   # [B, D]
-    new_type_ids = type_ids[:, :-1]
+    new_ratings = ratings                                                               # ignore ratings for now
     new_timestamps = timestamps[:, :-1]                                                                                            # [B, N-1]
     new_lengths = lengths - 1
     recall_metrics = eval_metrics_v2_from_tensors(
@@ -341,11 +345,12 @@ def eval_metrics_v3_from_tensors(
         model,  
         new_input_ids,
         new_raw_input_embeddings,
-        new_type_ids,
+        new_ratings,
         label_ids,
         raw_label_embeddings,
         new_timestamps,
         new_lengths,
+        new_type_ids,
     )
     metrics.update(recall_metrics)
 
