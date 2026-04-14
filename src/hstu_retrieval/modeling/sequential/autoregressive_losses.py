@@ -25,6 +25,7 @@ from rails.similarities.module import SimilarityModule
 
 from torch.utils.checkpoint import checkpoint
 from modeling.sequential.nagatives_sampler import NegativesSampler
+from registry import register
 
 
 class AutoregressiveLoss(torch.nn.Module):
@@ -83,6 +84,7 @@ class AutoregressiveLoss(torch.nn.Module):
         pass
 
 
+@register("loss", "BCELoss")
 class BCELoss(AutoregressiveLoss):
     def __init__(
         self,
@@ -203,6 +205,7 @@ class BCELoss(AutoregressiveLoss):
         )
 
 
+@register("loss", "BCELossWithRatings")
 class BCELossWithRatings(AutoregressiveLoss):
     def __init__(
         self,

@@ -19,6 +19,8 @@ import abc
 import torch
 import torch.nn.functional as F
 
+from registry import register
+
 
 class OutputPostprocessorModule(torch.nn.Module):
     @abc.abstractmethod
@@ -33,6 +35,7 @@ class OutputPostprocessorModule(torch.nn.Module):
         pass
 
 
+@register("postprocessor", "l2_norm")
 class L2NormEmbeddingPostprocessor(OutputPostprocessorModule):
     def __init__(
         self,
@@ -57,6 +60,7 @@ class L2NormEmbeddingPostprocessor(OutputPostprocessorModule):
         )
 
 
+@register("postprocessor", "layer_norm")
 class LayerNormEmbeddingPostprocessor(OutputPostprocessorModule):
     def __init__(
         self,

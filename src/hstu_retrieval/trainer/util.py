@@ -24,7 +24,8 @@ from modeling.sequential.encoder_utils import (
 
 from modeling.sequential.input_features_preprocessors import (
     LearnablePositionalEmbeddingInputFeaturesPreprocessor,
-    LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor
+    LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor,
+    LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor,
 )
 from modeling.sequential.losses.sampled_softmax import (
     SampledSoftmaxLoss,
@@ -36,7 +37,7 @@ from modeling.sequential.output_postprocessors import (
 from modeling.similarity_utils import (
     get_similarity_function,
 )
-from typing import Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional
 from data.reco_dataset import RecoDataset
 
 
@@ -61,7 +62,8 @@ def make_model(
 
     main_module: str = "HSTU",  # set to be "HSTU"
     embedding_module_type: str = "local",  # set to be "local"
-    item_embedding_dim: int = 50,  
+    item_embedding_dim: int = 50,
+    model_hidden_size: int = 0,  # 0 = same as item_embedding_dim
     interaction_module_type: str = "DotProduct",  
     user_embedding_norm: str = "l2_norm",  
     input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
@@ -74,7 +76,10 @@ def make_model(
     loss_activation_checkpoint: bool = False,
     sampling_strategy: str = "local",  
     item_l2_norm: bool = True,  
-    l2_norm_eps: float = 1e-6,  
+    l2_norm_eps: float = 1e-6,
+    supervision_domain_weights: Optional[Dict[int, float]] = None,
+    supervision_train_domains: Optional[List[int]] = None,
+    supervision_target_position: str = "all",
 ) -> torch.nn.Module:
     """
     Create and return the model for training.
@@ -87,6 +92,7 @@ def make_model(
         main_module=main_module,
         embedding_module_type=embedding_module_type,
         item_embedding_dim=item_embedding_dim,
+        model_hidden_size=model_hidden_size,
         interaction_module_type=interaction_module_type,
         user_embedding_norm=user_embedding_norm,
         input_preproc_module_type=input_preproc_module_type,
@@ -100,6 +106,9 @@ def make_model(
         sampling_strategy=sampling_strategy,
         item_l2_norm=item_l2_norm,
         l2_norm_eps=l2_norm_eps,
+        supervision_domain_weights=supervision_domain_weights,
+        supervision_train_domains=supervision_train_domains,
+        supervision_target_position=supervision_target_position,
         )
     return model
 
@@ -117,7 +126,8 @@ class SequentialRetrieval(torch.nn.Module):
 
             main_module: str = "HSTU",  # set to be "HSTU"
             embedding_module_type: str = "local",  # set to be "local"
-            item_embedding_dim: int = 50,  
+            item_embedding_dim: int = 50,
+            model_hidden_size: int = 0,  # 0 = same as item_embedding_dim
             interaction_module_type: str = "DotProduct",  
             user_embedding_norm: str = "l2_norm",  
             input_preproc_module_type: str = "LearnablePositionalEmbeddingInputFeaturesPreprocessor",  
@@ -130,7 +140,10 @@ class SequentialRetrieval(torch.nn.Module):
             loss_activation_checkpoint: bool = False,
             sampling_strategy: str = "global",  
             item_l2_norm: bool = True,  
-            l2_norm_eps: float = 1e-6,  
+            l2_norm_eps: float = 1e-6,
+            supervision_domain_weights: Optional[Dict[int, float]] = None,
+            supervision_train_domains: Optional[List[int]] = None,
+            supervision_target_position: str = "all",
             ) -> None:
         super().__init__()
 
@@ -144,11 +157,18 @@ class SequentialRetrieval(torch.nn.Module):
         self.domain_offset = dataset.domain_offset
         self.shard_size = dataset.shard_size
         self.shard_counts = dataset.shard_counts
+        self.num_event_types = getattr(dataset, 'num_event_types', 0)
         self.pinsage_ckpt_path = pinsage_ckpt_path
+
+        # Supervision config (defaults match legacy behavior: domain 0 weighted 32x)
+        self.supervision_domain_weights = supervision_domain_weights or {0: 32.0}
+        self.supervision_train_domains = supervision_train_domains
+        self.supervision_target_position = supervision_target_position
 
         self.main_module = main_module
         self.embedding_module_type = embedding_module_type
         self.item_embedding_dim = item_embedding_dim
+        self.model_hidden_size = model_hidden_size if model_hidden_size > 0 else item_embedding_dim
         self.interaction_module_type = interaction_module_type
         self.user_embedding_norm = user_embedding_norm
         self.input_preproc_module_type = input_preproc_module_type
@@ -229,11 +249,26 @@ class SequentialRetrieval(torch.nn.Module):
             )
         elif self.input_preproc_module_type == "LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor":
             input_preproc_module = LearnablePositionalEmbeddingRatedInputFeaturesPreprocessor(
-                max_sequence_len=self.max_sequence_length,                 # set to be 200 + 10(default) + 1 = 211
-                item_embedding_dim=self.item_embedding_dim,                        # set to be 50
-                dropout_rate=self.dropout_rate,                                   # set to be 0.2
-                rating_embedding_dim=self.rating_embedding_dim,                     # set to be 50
+                max_sequence_len=self.max_sequence_length,
+                item_embedding_dim=self.item_embedding_dim,
+                dropout_rate=self.dropout_rate,
+                rating_embedding_dim=self.rating_embedding_dim,
                 num_ratings=self.num_ratings,                             
+            )
+        elif self.input_preproc_module_type == "LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor":
+            input_preproc_module = LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
+                max_sequence_len=self.max_sequence_length,
+                item_embedding_dim=self.item_embedding_dim,
+                model_hidden_size=self.model_hidden_size,
+                dropout_rate=self.dropout_rate,
+                num_event_types=self.num_event_types,
+            )
+
+        # Optional projection: item_embedding_dim → model_hidden_size
+        self._embedding_proj = None
+        if self.model_hidden_size != self.item_embedding_dim:
+            self._embedding_proj = torch.nn.Linear(
+                self.item_embedding_dim, self.model_hidden_size, bias=False
             )
 
         model = get_sequential_encoder(
@@ -349,6 +384,7 @@ class SequentialRetrieval(torch.nn.Module):
         label_ids: torch.Tensor,
         raw_label_embeddings: torch.Tensor,
         ratings: torch.Tensor = None,
+        type_ids: torch.Tensor = None,
         timestamps: torch.Tensor = None,
         user_ids: torch.Tensor = None,   
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -377,23 +413,41 @@ class SequentialRetrieval(torch.nn.Module):
             past_lengths=input_lengths,
             past_ids=input_ids,
             past_embeddings=past_embeddings,
-            past_payloads={"timestamps": timestamps, "ratings": ratings},                                      # past_ratings, (past_timestamps + 1)
+            past_payloads={"timestamps": timestamps, "ratings": ratings, "type_ids": type_ids},                                      # past_ratings, (past_timestamps + 1)
         )
         # logging.info(f"seq_embeddings shape {seq_embeddings.shape}")                     # [128, 211, 50]
 
 
         ar_mask = label_ids != 0
-        # if label_ids < self.domain_offset (domain 0, target domain), increase supervision_weights
         supervision_weights = ar_mask.float()
 
-        # adjust supervision weights for ad events
-        supervision_weights[label_ids < self.domain_offset] *= 32.0
+        # Config-driven domain weighting (replaces hardcoded 32x multiplier)
+        for domain_id, weight in self.supervision_domain_weights.items():
+            if domain_id == 0:
+                # Domain 0: label_ids < domain_offset
+                domain_mask = label_ids < self.domain_offset
+            else:
+                # Domain N: label_ids in [N * domain_offset, (N+1) * domain_offset)
+                domain_mask = (label_ids >= domain_id * self.domain_offset) & (
+                    label_ids < (domain_id + 1) * self.domain_offset
+                )
+            supervision_weights[domain_mask] *= weight
 
-        # train on ad events only
-        # supervision_weights[label_ids >= self.domain_offset] *= 0
+        # Config-driven domain restriction (replaces commented-out "train on ads only")
+        if self.supervision_train_domains is not None:
+            train_mask = torch.zeros_like(label_ids, dtype=torch.bool)
+            for domain_id in self.supervision_train_domains:
+                if domain_id == 0:
+                    train_mask |= label_ids < self.domain_offset
+                else:
+                    train_mask |= (label_ids >= domain_id * self.domain_offset) & (
+                        label_ids < (domain_id + 1) * self.domain_offset
+                    )
+            supervision_weights[~train_mask] = 0.0
 
-        # train on last event only (must be ad event due to data construction)
-        # supervision_weights = keep_last_nonzero(supervision_weights)
+        # Config-driven target position (replaces commented-out "train on last event only")
+        if self.supervision_target_position == "last":
+            supervision_weights = keep_last_nonzero(supervision_weights)
 
         loss, aux_losses, metrics = self.ar_loss(
             lengths=input_lengths,  # [B],

@@ -17,6 +17,7 @@
 import abc
 import os
 import torch
+from registry import register
 import numpy as np
 from typing import Tuple, Dict, List
 from modeling.initialization import truncated_normal
@@ -45,6 +46,7 @@ class EmbeddingModule(torch.nn.Module):
         pass
 
 
+@register("embedding", "local")
 class LocalEmbeddingModule(EmbeddingModule):
     def __init__(
         self,
@@ -80,6 +82,7 @@ class LocalEmbeddingModule(EmbeddingModule):
         return self._item_embedding_dim
 
 
+@register("embedding", "CategoricalEmbedding")
 class CategoricalEmbeddingModule(EmbeddingModule):
     def __init__(
         self,
@@ -124,6 +127,7 @@ def init_mlp_weights_optional_bias(m: torch.nn.Module) -> None:
         if m.bias is not None:
             m.bias.data.fill_(0.0)
 
+@register("embedding", "MultiDomainPrecomputed")
 class MultiDomainPrecomputedEmbeddingModule(EmbeddingModule):
     def __init__(self, domain_to_item_id_range: Dict[int, Tuple[int, int]], shard_dirs: dict, preload: bool = False, input_dim: int = 768, output_dim: int = 256, shard_size: int = 25_000_000, domain_offset: int = 1_000_000_000) -> None:
         """
@@ -289,6 +293,7 @@ class MultiDomainPrecomputedEmbeddingModule(EmbeddingModule):
         return self.proj(raw_input_embeddings)
 
 
+@register("embedding", "xlm_roberta_base_proj")
 class XLMRobertaBaseProjEmbeddingModule(EmbeddingModule):
     def __init__(self, input_dim: int = 768, output_dim: int = 64) -> None:
         super().__init__()
@@ -370,6 +375,7 @@ class XLMRobertaBaseProjEmbeddingModule(EmbeddingModule):
         return projected.view(*output_shape)
 
 
+@register("embedding", "pinsage_proj")
 class PinSageProjEmbeddingModule(EmbeddingModule):
     def __init__(self, input_dim: int = 64, output_dim: int = 256, ckpt_path: str = "") -> None:
         super().__init__()

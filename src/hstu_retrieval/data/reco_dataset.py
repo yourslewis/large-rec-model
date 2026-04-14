@@ -57,6 +57,7 @@ class RecoDataset:
     min_item_id: int = 0
     max_item_id: int = 0
     num_ratings: int = 0
+    num_event_types: int = 0
 
 
 @gin.configurable
@@ -160,6 +161,7 @@ def get_reco_dataset(
             domain_offset=1_000_000_000,
             shard_size=25_000_000,
             shard_counts={0: 2, 1: 13, 2: 2},
+            num_event_types=len(semantic_next_event_prediction.EVENT_TYPE_DICT),
             positional_sampling_ratio=positional_sampling_ratio,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,

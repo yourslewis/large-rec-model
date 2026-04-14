@@ -44,6 +44,8 @@ from modeling.similarity_module import (
 )
 from rails.similarities.module import SimilarityModule
 
+from registry import register
+
 
 TIMESTAMPS_KEY = "timestamps"
 
@@ -540,6 +542,7 @@ class HSTUJagged(torch.nn.Module):
         return y, cache_states
 
 
+@register("encoder", "HSTU")
 class HSTU(SequentialEncoderWithLearnedSimilarityModule):
     """
     Implements HSTU (Hierarchical Sequential Transduction Unit) in

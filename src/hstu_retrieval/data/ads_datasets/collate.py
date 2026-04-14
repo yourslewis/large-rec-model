@@ -46,12 +46,19 @@ class CollateFn:
         ratings_tensor = torch.tensor([sample["ratings"] for sample in batch], dtype=torch.long)
         user_id_tensor = [sample["user_id"] for sample in batch]
 
+        # type_ids may not be present in all datasets
+        if "type_ids" in batch[0]:
+            type_ids_tensor = torch.stack([sample["type_ids"] for sample in batch])
+        else:
+            type_ids_tensor = torch.zeros_like(input_ids_tensor)
+
         result = {
             "input_ids": input_ids_tensor,
             "timestamps": timestamps_tensor,
             "lengths": length_tensor,
             "user_id": user_id_tensor,
             "ratings": ratings_tensor,
+            "type_ids": type_ids_tensor,
         }
 
         
