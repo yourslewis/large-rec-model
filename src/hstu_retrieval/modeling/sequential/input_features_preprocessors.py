@@ -269,11 +269,14 @@ class CombinedItemAndRatingInputFeaturesPreprocessor(InputFeaturesPreprocessorMo
 class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
-    """Preprocessor that fuses event type embeddings (impression/click/conversion)
-    with item embeddings before adding positional encoding.
+    """Preprocessor that fuses event type embeddings with item embeddings
+    via additive fusion, matching the original upstream architecture.
 
-    Event types are expected in past_payloads["event_types"] as integer tensor [B, N].
-    Typical mapping: 0=pad, 1=impression, 2=click, 3=add_to_cart, 4=conversion.
+    When model_hidden_size != item_embedding_dim, a linear projection maps
+    item embeddings to the hidden size first. Event type and positional
+    embeddings are both at model_hidden_size and added directly.
+
+    Event types are expected in past_payloads["type_ids"] as integer tensor [B, N].
     """
 
     def __init__(
@@ -282,40 +285,44 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
         embedding_dim: int,
         dropout_rate: float,
         num_event_types: int = 8,
-        event_type_embedding_dim: int = 16,
+        model_hidden_size: int = 0,
     ) -> None:
         super().__init__()
 
         self._embedding_dim: int = embedding_dim
+        self._hidden_size: int = model_hidden_size if model_hidden_size > 0 else embedding_dim
+
+        # Optional projection: item_embedding_dim -> model_hidden_size
+        if self._hidden_size != self._embedding_dim:
+            self._fc = torch.nn.Linear(embedding_dim, self._hidden_size)
+        else:
+            self._fc = torch.nn.Identity()
+
         self._pos_emb: torch.nn.Embedding = torch.nn.Embedding(
             max_sequence_len,
-            self._embedding_dim,
+            self._hidden_size,
         )
         self._event_type_emb: torch.nn.Embedding = torch.nn.Embedding(
-            num_event_types,
-            event_type_embedding_dim,
-        )
-        self._fusion_proj = torch.nn.Linear(
-            embedding_dim + event_type_embedding_dim,
-            embedding_dim,
+            num_event_types + 1,  # +1 for padding index
+            self._hidden_size,
         )
         self._dropout_rate: float = dropout_rate
         self._emb_dropout = torch.nn.Dropout(p=dropout_rate)
         self.reset_state()
 
     def debug_str(self) -> str:
-        return f"posi_evt_d{self._dropout_rate}"
+        return f"posir_d{self._dropout_rate}"
 
     def reset_state(self) -> None:
         truncated_normal(
             self._pos_emb.weight.data,
             mean=0.0,
-            std=math.sqrt(1.0 / self._embedding_dim),
+            std=math.sqrt(1.0 / self._hidden_size),
         )
         truncated_normal(
             self._event_type_emb.weight.data,
             mean=0.0,
-            std=math.sqrt(1.0 / self._event_type_emb.embedding_dim),
+            std=math.sqrt(1.0 / self._hidden_size),
         )
 
     def forward(
@@ -326,16 +333,13 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
         past_payloads: Dict[str, torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, N = past_ids.size()
+        assert past_embeddings.size(-1) == self._embedding_dim, "Embedding dimension mismatch."
 
-        # Fuse item embeddings with event type embeddings
-        event_types = past_payloads.get("type_ids", torch.zeros(B, N, dtype=torch.long, device=past_ids.device))
-        event_emb = self._event_type_emb(event_types.long())  # [B, N, event_dim]
-        concat_emb = torch.cat([past_embeddings, event_emb], dim=-1)  # [B, N, D + event_dim]
-        fused_emb = self._fusion_proj(concat_emb)  # [B, N, D]
-
-        # Scale + positional encoding
-        user_embeddings = fused_emb * (self._embedding_dim ** 0.5) + self._pos_emb(
-            torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1)
+        # Additive fusion: fc(item_emb) + pos_emb + event_type_emb
+        user_embeddings = (
+            self._fc(past_embeddings)
+            + self._pos_emb(torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1))
+            + self._event_type_emb(past_payloads["type_ids"].int())
         )
         user_embeddings = self._emb_dropout(user_embeddings)
 

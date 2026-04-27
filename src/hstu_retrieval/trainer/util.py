@@ -261,6 +261,7 @@ class SequentialRetrieval(torch.nn.Module):
                 embedding_dim=self.item_embedding_dim,
                 dropout_rate=self.dropout_rate,
                 num_event_types=self.num_event_types,
+                model_hidden_size=self.model_hidden_size,
             )
 
         # Optional projection: item_embedding_dim → model_hidden_size
