@@ -263,7 +263,7 @@ class Trainer:
                 # print(f"new input ids shape: {new_input_ids.shape}")
                 # print(f"new timestamps shape: {new_timestamps.shape}")
                 
-                # Perform evaluation every 1000 iterations
+                # Checkpoint + rotate every 1000 iterations; skip eval (runs offline)
                 if batch_id % 1000 == 0:
                     if self.rank == 0:
                         logging.info(f"Saving snapshot at batch {batch_id}")
@@ -282,6 +282,16 @@ class Trainer:
                     torch.cuda.empty_cache()
                     
                     self.model.train()
+
+
+
+
+
+
+
+
+
+
 
                 self.opt.zero_grad()
                 logits, loss, metrics = self.model(

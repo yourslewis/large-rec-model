@@ -23,6 +23,17 @@ import torch
 import logging
 
 
+def _worker_init_fn(worker_id):
+    """Ensure DataLoader workers die when parent dies (prevents zombie processes)."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, 15)  # SIGTERM on parent death
+    except Exception:
+        pass  # Non-Linux platforms
+
+
 @gin.configurable
 def create_data_loader(
     dataset: torch.utils.data.IterableDataset,  # Updated to accept IterableDataset
@@ -52,7 +63,8 @@ def create_data_loader(
         drop_last=drop_last,  # Drop the last incomplete batch if specified
         # prefetch_factor=prefetch_factor,
         collate_fn=collate_fn,
-        pin_memory=True
+        pin_memory=True,
+        worker_init_fn=_worker_init_fn,
     )
 
     return data_loader
