@@ -40,11 +40,19 @@ class L2NormEmbeddingPostprocessor(OutputPostprocessorModule):
     def __init__(
         self,
         embedding_dim: int,
+        model_hidden_size: int = 0,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self._embedding_dim: int = embedding_dim
+        self._hidden_size: int = model_hidden_size if model_hidden_size > 0 else embedding_dim
         self._eps: float = eps
+
+        # Project from model hidden size back to item embedding dim if needed
+        if self._hidden_size != self._embedding_dim:
+            self._proj = torch.nn.Linear(self._hidden_size, self._embedding_dim, bias=False)
+        else:
+            self._proj = torch.nn.Identity()
 
     def debug_str(self) -> str:
         return "l2"
@@ -53,7 +61,7 @@ class L2NormEmbeddingPostprocessor(OutputPostprocessorModule):
         self,
         output_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        output_embeddings = output_embeddings[..., : self._embedding_dim]
+        output_embeddings = self._proj(output_embeddings)
         return output_embeddings / torch.clamp(
             torch.linalg.norm(output_embeddings, ord=None, dim=-1, keepdim=True),
             min=self._eps,
