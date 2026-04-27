@@ -206,7 +206,7 @@ class Trainer:
         if self.main_module_bf16:                                 # default to be False
             self.model = self.model.to(torch.bfloat16)
         self.model = self.model.to(self.device)
-        self.model = DDP(self.model, device_ids=[self.local_rank])
+        self.model = DDP(self.model, device_ids=[self.local_rank], find_unused_parameters=True)
 
         date_str = date.today().strftime("%Y-%m-%d")
         model_subfolder = f"{self.dataset.dataset_name}-l{self.dataset.max_sequence_length}"
@@ -263,7 +263,7 @@ class Trainer:
                 # print(f"new input ids shape: {new_input_ids.shape}")
                 # print(f"new timestamps shape: {new_timestamps.shape}")
                 
-                # Perform evaluation every 1000 iterations
+                # Checkpoint + rotate every 1000 iterations; skip eval (runs offline)
                 if batch_id % 1000 == 0:
                     if self.rank == 0:
                         logging.info(f"Saving snapshot at batch {batch_id}")
@@ -282,6 +282,16 @@ class Trainer:
                     torch.cuda.empty_cache()
                     
                     self.model.train()
+
+
+
+
+
+
+
+
+
+
 
                 self.opt.zero_grad()
                 logits, loss, metrics = self.model(
@@ -675,7 +685,11 @@ class Trainer:
 
         latest_snapshot = checkpoint_files[-1]
         logging.info(f"Loading latest snapshot: {latest_snapshot}")
-        snapshot = torch.load(latest_snapshot, map_location="cpu")
+        try:
+            snapshot = torch.load(latest_snapshot, map_location="cpu")
+        except Exception as e:
+            logging.warning(f"Failed to load snapshot {latest_snapshot}: {e}. Starting fresh.")
+            return False
 
         self.model.load_state_dict(snapshot["MODEL_STATE"])
         self.opt.load_state_dict(snapshot["OPTIMIZER_STATE"])

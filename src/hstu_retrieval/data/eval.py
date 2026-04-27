@@ -110,7 +110,8 @@ def eval_metrics_v2_from_tensors(
     label_ids: torch.Tensor, 
     raw_label_embeddings: torch.Tensor, 
     timestamps: torch.Tensor,                      
-    lengths: torch.Tensor,                           
+    lengths: torch.Tensor,
+    type_ids: torch.Tensor = None,
     filter_invalid_ids: bool = False,                # default to be true
     user_max_batch_size: Optional[int] = None,      # default to be None
     dtype: Optional[torch.dtype] = None,            # default to be None
@@ -139,7 +140,7 @@ def eval_metrics_v2_from_tensors(
         past_ids=input_ids,
         # pyre-fixme[29]: `Union[Tensor, Module]` is not a function.
         past_embeddings=past_embeddings,
-        past_payloads={"timestamps": timestamps, 'ratings': ratings, 'type_ids': type_ids},            # past_ratings, (past_timestamps + 1)
+        past_payloads={"timestamps": timestamps, 'ratings': ratings, 'type_ids': type_ids},                                  # past_ratings, (past_timestamps + 1)
     )
     if dtype is not None:                                                  # default to be None
         shared_input_embeddings = shared_input_embeddings.to(dtype)
