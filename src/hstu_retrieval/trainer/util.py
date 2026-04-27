@@ -233,6 +233,7 @@ class SequentialRetrieval(torch.nn.Module):
         output_postproc_module = (
             L2NormEmbeddingPostprocessor(
                 embedding_dim=self.item_embedding_dim,          # set to be 50
+                model_hidden_size=self.model_hidden_size,
                 eps=1e-6,
             )
             if self.user_embedding_norm == "l2_norm"
@@ -261,6 +262,7 @@ class SequentialRetrieval(torch.nn.Module):
                 embedding_dim=self.item_embedding_dim,
                 dropout_rate=self.dropout_rate,
                 num_event_types=self.num_event_types,
+                model_hidden_size=self.model_hidden_size,
             )
 
         # Optional projection: item_embedding_dim → model_hidden_size
