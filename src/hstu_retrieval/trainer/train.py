@@ -685,7 +685,11 @@ class Trainer:
 
         latest_snapshot = checkpoint_files[-1]
         logging.info(f"Loading latest snapshot: {latest_snapshot}")
-        snapshot = torch.load(latest_snapshot, map_location="cpu")
+        try:
+            snapshot = torch.load(latest_snapshot, map_location="cpu")
+        except Exception as e:
+            logging.warning(f"Failed to load snapshot {latest_snapshot}: {e}. Starting fresh.")
+            return False
 
         self.model.load_state_dict(snapshot["MODEL_STATE"])
         self.opt.load_state_dict(snapshot["OPTIMIZER_STATE"])

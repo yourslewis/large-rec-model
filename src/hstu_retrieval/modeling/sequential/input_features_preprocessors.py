@@ -270,11 +270,13 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
     InputFeaturesPreprocessorModule
 ):
     """Preprocessor that fuses event type embeddings with item embeddings
-    via additive fusion, matching the original upstream architecture.
+    using additive fusion before adding positional encoding.
 
-    When model_hidden_size != item_embedding_dim, a linear projection maps
-    item embeddings to the hidden size first. Event type and positional
-    embeddings are both at model_hidden_size and added directly.
+    Matches upstream architecture:
+    - Optional linear projection: item_embedding_dim -> model_hidden_size
+    - Event type embedding at full model_hidden_size
+    - Additive fusion: fc(item_emb) + event_type_emb + pos_emb
+    - num_event_types+1 to account for padding (index 0)
 
     Event types are expected in past_payloads["type_ids"] as integer tensor [B, N].
     """
@@ -282,28 +284,26 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
     def __init__(
         self,
         max_sequence_len: int,
-        embedding_dim: int,
+        item_embedding_dim: int,
+        model_hidden_size: int,
         dropout_rate: float,
-        num_event_types: int = 8,
-        model_hidden_size: int = 0,
+        num_event_types: int,
     ) -> None:
         super().__init__()
 
-        self._embedding_dim: int = embedding_dim
-        self._hidden_size: int = model_hidden_size if model_hidden_size > 0 else embedding_dim
+        self._embedding_dim: int = item_embedding_dim
+        self._hidden_size: int = model_hidden_size
 
-        # Optional projection: item_embedding_dim -> model_hidden_size
         if self._hidden_size != self._embedding_dim:
-            self._fc = torch.nn.Linear(embedding_dim, self._hidden_size)
+            self._fc = torch.nn.Linear(item_embedding_dim, model_hidden_size)
         else:
             self._fc = torch.nn.Identity()
-
         self._pos_emb: torch.nn.Embedding = torch.nn.Embedding(
             max_sequence_len,
             self._hidden_size,
         )
         self._event_type_emb: torch.nn.Embedding = torch.nn.Embedding(
-            num_event_types + 1,  # +1 for padding index
+            num_event_types + 1,
             self._hidden_size,
         )
         self._dropout_rate: float = dropout_rate
@@ -334,13 +334,7 @@ class LearnablePositionalEmbeddingEventTypeEmbeddingInputFeaturesPreprocessor(
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         B, N = past_ids.size()
         assert past_embeddings.size(-1) == self._embedding_dim, "Embedding dimension mismatch."
-
-        # Additive fusion: fc(item_emb) + pos_emb + event_type_emb
-        user_embeddings = (
-            self._fc(past_embeddings)
-            + self._pos_emb(torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1))
-            + self._event_type_emb(past_payloads["type_ids"].int())
-        )
+        user_embeddings = self._fc(past_embeddings) + self._pos_emb(torch.arange(N, device=past_ids.device).unsqueeze(0).repeat(B, 1)) + self._event_type_emb(past_payloads["type_ids"].int())
         user_embeddings = self._emb_dropout(user_embeddings)
 
         valid_mask = (past_ids != 0).unsqueeze(-1).float()  # [B, N, 1]
