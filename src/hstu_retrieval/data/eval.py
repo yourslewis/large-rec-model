@@ -115,6 +115,7 @@ def eval_metrics_v2_from_tensors(
     filter_invalid_ids: bool = False,                # default to be true
     user_max_batch_size: Optional[int] = None,      # default to be None
     dtype: Optional[torch.dtype] = None,            # default to be None
+    type_ids: torch.Tensor = None,
 ) -> Dict[str, Union[float, torch.Tensor]]: 
     """
     Args:
@@ -340,6 +341,7 @@ def eval_metrics_v3_from_tensors(
     new_ratings = ratings                                                               # ignore ratings for now
     new_timestamps = timestamps[:, :-1]                                                                                            # [B, N-1]
     new_lengths = lengths - 1
+    new_type_ids_recall = type_ids[:, :-1] if type_ids is not None else None
     recall_metrics = eval_metrics_v2_from_tensors(
         eval_state,
         model,  
@@ -350,7 +352,7 @@ def eval_metrics_v3_from_tensors(
         raw_label_embeddings,
         new_timestamps,
         new_lengths,
-        new_type_ids,
+        type_ids=new_type_ids_recall,
     )
     metrics.update(recall_metrics)
 
